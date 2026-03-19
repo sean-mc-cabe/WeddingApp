@@ -1,0 +1,529 @@
+# =========================
+# CONFIG
+# =========================
+$SiteUrl            = "https://contoso.sharepoint.com/sites/Policies"
+$SourceLibrary      = "RawPolicies"
+$DestinationLibrary = "Cleaned"
+
+$TempRoot           = "C:\Temp\PdfProcessing"
+$DownloadRoot       = Join-Path $TempRoot "Download"
+$OutputRoot         = Join-Path $TempRoot "Output"
+$FailedRoot         = Join-Path $TempRoot "Failed"
+$ReportPath         = Join-Path $TempRoot "processing-report.csv"
+$LogPath            = Join-Path $TempRoot "processing.log"
+
+$MinTextSizeKB       = 5
+$MinWordCount        = 200
+$RestartWordEvery    = 25
+$RepeatLineMinChars  = 8
+$RepeatLineThreshold = 3
+
+$ApprovedStatuses = @("Approved")
+$StatusChoices    = @("Draft","Approved","Archived")
+$DocTypeChoices   = @("FAQ","Policy","Procedure","Guidance","Form")
+
+# Test / control
+$MaxFiles   = 0
+$OnlyFolder = ""
+$NameLike   = ""
+$DryRun     = $false
+
+# Stop words
+$StopWords = @(
+    "the","and","for","with","that","this","from","have","will","your","you",
+    "are","was","were","has","had","not","but","all","can","may","into","per",
+    "its","any","our","their","they","them","his","her","she","him","who","what",
+    "when","where","how","why","which","shall","should","would","could","page",
+    "pages","document","policy","procedure","using","used","use","each","other",
+    "than","then","also","such","must","been","being","more","most","only","over",
+    "under","between","within","these","those","there","here","because","about",
+    "after","before","during","while","whereas","into","onto","upon","including",
+    "include","includes","required","requirement","requirements","purpose"
+)
+
+# =========================
+# SETUP
+# =========================
+$ErrorActionPreference = "Stop"
+
+@($TempRoot, $DownloadRoot, $OutputRoot, $FailedRoot) | ForEach-Object {
+    if (-not (Test-Path $_)) {
+        New-Item -Path $_ -ItemType Directory -Force | Out-Null
+    }
+}
+
+if (Test-Path $LogPath) {
+    Remove-Item $LogPath -Force -ErrorAction SilentlyContinue
+}
+
+function Write-Log {
+    param([string]$Message)
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $Message"
+    Add-Content -Path $LogPath -Value $line
+    Write-Host $line
+}
+
+function Invoke-WithRetry {
+    param(
+        [scriptblock]$ScriptBlock,
+        [int]$MaxAttempts = 3,
+        [int]$DelaySeconds = 2,
+        [string]$ActionName = "Action"
+    )
+
+    $attempt = 0
+    while ($attempt -lt $MaxAttempts) {
+        $attempt++
+        try {
+            return & $ScriptBlock
+        }
+        catch {
+            if ($attempt -ge $MaxAttempts) { throw }
+            Write-Log "$ActionName failed on attempt $attempt. Retrying in $DelaySeconds sec. Error: $($_.Exception.Message)"
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+}
+
+function Start-Word {
+    $word = New-Object -ComObject Word.Application
+    $word.Visible = $false
+    $word.DisplayAlerts = 0
+    return $word
+}
+
+function Stop-Word($word) {
+    if ($word) {
+        try { $word.Quit() } catch {}
+        try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) } catch {}
+        [gc]::Collect()
+        [gc]::WaitForPendingFinalizers()
+    }
+}
+
+function Safe-Name([string]$Name) {
+    $invalid = [System.IO.Path]::GetInvalidFileNameChars()
+    foreach ($char in $invalid) {
+        $Name = $Name.Replace($char, "_")
+    }
+    return $Name.Trim().TrimEnd(".")
+}
+
+function Get-RelativeFolder([string]$sourceUrl, [string]$sourceRoot) {
+    $relativePath = $sourceUrl.Substring($sourceRoot.Length).TrimStart("/")
+    $relativeFolder = [System.IO.Path]::GetDirectoryName($relativePath)
+    if ($relativeFolder -eq "." -or $null -eq $relativeFolder) { $relativeFolder = "" }
+    return ($relativeFolder -replace "\\","/").Trim("/")
+}
+
+function Get-Category([string]$relativeFolder) {
+    if (-not $relativeFolder) { return "Uncategorised" }
+
+    $parts = $relativeFolder -split "/"
+    return $parts[0]
+}
+
+function Ensure-DocumentLibrary {
+    param([string]$LibraryTitle)
+
+    $list = Get-PnPList -Identity $LibraryTitle -ErrorAction SilentlyContinue
+    if (-not $list) {
+        if ($DryRun) {
+            Write-Log "[DRY RUN] Would create library: $LibraryTitle"
+            return $null
+        }
+        Write-Log "Creating library: $LibraryTitle"
+        $list = Invoke-WithRetry -ActionName "Create library $LibraryTitle" -ScriptBlock {
+            New-PnPList -Title $LibraryTitle -Template DocumentLibrary -OnQuickLaunch:$false
+        }
+    }
+    else {
+        Write-Log "Library already exists: $LibraryTitle"
+    }
+
+    return $list
+}
+
+function Ensure-FieldXml {
+    param(
+        [string]$ListName,
+        [string]$InternalName,
+        [string]$FieldXml
+    )
+
+    $existing = Get-PnPField -List $ListName -Identity $InternalName -ErrorAction SilentlyContinue
+    if ($existing) { return }
+
+    if ($DryRun) {
+        Write-Log "[DRY RUN] Would create field: $ListName / $InternalName"
+        return
+    }
+
+    Write-Log "Creating field: $ListName / $InternalName"
+    Invoke-WithRetry -ActionName "Create field $InternalName" -ScriptBlock {
+        Add-PnPFieldFromXml -List $ListName -FieldXml $FieldXml | Out-Null
+    }
+}
+
+function Ensure-LibrarySchema {
+    $statusChoicesXml = ($StatusChoices | ForEach-Object { "<CHOICE>$_</CHOICE>" }) -join ""
+    $docTypeChoicesXml = ($DocTypeChoices | ForEach-Object { "<CHOICE>$_</CHOICE>" }) -join ""
+
+    # Cleaned library
+    Ensure-DocumentLibrary -LibraryTitle $DestinationLibrary | Out-Null
+
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "Status"             -FieldXml "<Field Type=`"Choice`" DisplayName=`"Status`" Name=`"Status`" StaticName=`"Status`" Format=`"Dropdown`" Indexed=`"TRUE`" Group=`"Custom Columns`"><CHOICES>$statusChoicesXml</CHOICES></Field>"
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "DocumentType"       -FieldXml "<Field Type=`"Choice`" DisplayName=`"Document Type`" Name=`"DocumentType`" StaticName=`"DocumentType`" Format=`"Dropdown`" Indexed=`"TRUE`" Group=`"Custom Columns`"><CHOICES>$docTypeChoicesXml</CHOICES></Field>"
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "Category"           -FieldXml '<Field Type="Text" DisplayName="Category" Name="Category" StaticName="Category" Indexed="TRUE" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "SourcePath"         -FieldXml '<Field Type="Text" DisplayName="Source Path" Name="SourcePath" StaticName="SourcePath" Indexed="TRUE" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "OriginalFileName"   -FieldXml '<Field Type="Text" DisplayName="Original File Name" Name="OriginalFileName" StaticName="OriginalFileName" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "NeedsOCR"           -FieldXml '<Field Type="Boolean" DisplayName="Needs OCR" Name="NeedsOCR" StaticName="NeedsOCR" Indexed="TRUE" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "ProcessingStatus"   -FieldXml '<Field Type="Choice" DisplayName="Processing Status" Name="ProcessingStatus" StaticName="ProcessingStatus" Format="Dropdown" Indexed="TRUE" Group="Custom Columns"><CHOICES><CHOICE>Success</CHOICE><CHOICE>Needs OCR</CHOICE><CHOICE>Failed</CHOICE><CHOICE>Skipped</CHOICE></CHOICES></Field>'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "ProcessedDate"      -FieldXml '<Field Type="DateTime" DisplayName="Processed Date" Name="ProcessedDate" StaticName="ProcessedDate" Format="DateTime" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "SourceFileUrl"      -FieldXml '<Field Type="Text" DisplayName="Source File URL" Name="SourceFileUrl" StaticName="SourceFileUrl" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "SourceModifiedDate" -FieldXml '<Field Type="DateTime" DisplayName="Source Modified Date" Name="SourceModifiedDate" StaticName="SourceModifiedDate" Format="DateTime" Indexed="TRUE" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "Keywords"           -FieldXml '<Field Type="Note" DisplayName="Keywords" Name="Keywords" StaticName="Keywords" NumLines="6" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "KeyPhrases"         -FieldXml '<Field Type="Note" DisplayName="Key Phrases" Name="KeyPhrases" StaticName="KeyPhrases" NumLines="6" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "SearchTags"         -FieldXml '<Field Type="Note" DisplayName="Search Tags" Name="SearchTags" StaticName="SearchTags" NumLines="6" Group="Custom Columns" />'
+    Ensure-FieldXml -ListName $DestinationLibrary -InternalName "ContentQuality"     -FieldXml '<Field Type="Choice" DisplayName="Content Quality" Name="ContentQuality" StaticName="ContentQuality" Format="Dropdown" Indexed="TRUE" Group="Custom Columns"><CHOICES><CHOICE>Good</CHOICE><CHOICE>Review</CHOICE><CHOICE>OCR Likely</CHOICE></CHOICES></Field>'
+}
+
+function Remove-DestinationFileIfExists {
+    param(
+        [string]$TargetFolder,
+        [string]$FileName
+    )
+
+    try {
+        $existing = Get-PnPFolderItem -FolderSiteRelativeUrl $TargetFolder -ItemType File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq $FileName } |
+            Select-Object -First 1
+
+        if ($existing) {
+            if ($DryRun) {
+                Write-Log "[DRY RUN] Would delete destination file: $($existing.ServerRelativeUrl)"
+            }
+            else {
+                Invoke-WithRetry -ActionName "Delete destination file" -ScriptBlock {
+                    Remove-PnPFile -ServerRelativeUrl $existing.ServerRelativeUrl -Force
+                }
+                Write-Log "Deleted destination file: $($existing.ServerRelativeUrl)"
+            }
+            return $existing.ServerRelativeUrl
+        }
+    }
+    catch {
+        Write-Log "Failed checking/deleting destination file in $TargetFolder for $FileName -- $($_.Exception.Message)"
+    }
+
+    return ""
+}
+
+function Clean-Doc($doc) {
+    for ($i = $doc.InlineShapes.Count; $i -ge 1; $i--) {
+        try { $doc.InlineShapes.Item($i).Delete() } catch {}
+    }
+
+    for ($i = $doc.Shapes.Count; $i -ge 1; $i--) {
+        try { $doc.Shapes.Item($i).Delete() } catch {}
+    }
+
+    foreach ($section in $doc.Sections) {
+        foreach ($header in $section.Headers) {
+            try { $header.Range.Text = "" } catch {}
+        }
+        foreach ($footer in $section.Footers) {
+            try { $footer.Range.Text = "" } catch {}
+        }
+    }
+
+    $find = $doc.Content.Find
+    $find.ClearFormatting()
+    $find.Replacement.ClearFormatting()
+    $find.Forward = $true
+    $find.Wrap = 1
+
+    $find.Text = "^p^p^p"
+    $find.Replacement.Text = "^p^p"
+    $find.MatchWildcards = $false
+    for ($x = 0; $x -lt 5; $x++) {
+        $null = $find.Execute($find.Text, $false, $false, $false, $false, $false, $true, 1, $false, $find.Replacement.Text, 2)
+    }
+
+    $find.Text = "Page [0-9]{1,} of [0-9]{1,}"
+    $find.Replacement.Text = ""
+    $find.MatchWildcards = $true
+    $null = $find.Execute($find.Text, $false, $false, $false, $false, $false, $true, 1, $true, $find.Replacement.Text, 2)
+
+    $find.Text = "Page [0-9]{1,}"
+    $find.Replacement.Text = ""
+    $null = $find.Execute($find.Text, $false, $false, $false, $false, $false, $true, 1, $true, $find.Replacement.Text, 2)
+
+    $find.MatchWildcards = $false
+}
+
+function Normalize-Text([string]$Text) {
+    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
+
+    $Text = $Text -replace "`r`n", "`n"
+    $Text = $Text -replace "`r", "`n"
+    $Text = $Text -replace "[\t ]{2,}", " "
+    $Text = $Text -replace "\n{3,}", "`n`n"
+    return $Text.Trim()
+}
+
+function Remove-RepeatedLines {
+    param(
+        [string]$Text,
+        [int]$MinChars = 8,
+        [int]$Threshold = 3
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
+
+    $lines = $Text -split "`n"
+    $normalizedCounts = @{}
+
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if ($trimmed.Length -lt $MinChars) { continue }
+
+        $key = ($trimmed.ToLowerInvariant() -replace '\s+', ' ')
+        if (-not $normalizedCounts.ContainsKey($key)) {
+            $normalizedCounts[$key] = 0
+        }
+        $normalizedCounts[$key]++
+    }
+
+    $repeated = $normalizedCounts.GetEnumerator() |
+        Where-Object { $_.Value -ge $Threshold } |
+        Select-Object -ExpandProperty Key
+
+    if (-not $repeated) { return $Text }
+
+    $filtered = foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if ($trimmed.Length -lt $MinChars) {
+            $line
+            continue
+        }
+
+        $key = ($trimmed.ToLowerInvariant() -replace '\s+', ' ')
+        if ($repeated -contains $key) { continue }
+
+        $line
+    }
+
+    return (($filtered -join "`n") -replace "\n{3,}", "`n`n").Trim()
+}
+
+function Get-Keywords {
+    param([string]$Text, [int]$Top = 15)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+
+    $clean = $Text.ToLowerInvariant()
+    $clean = [regex]::Replace($clean, '[^a-z0-9\s\-]', ' ')
+    $tokens = $clean -split '\s+' | Where-Object {
+        $_ -and $_.Length -ge 4 -and $_ -notmatch '^\d+$' -and $StopWords -notcontains $_
+    }
+
+    if (-not $tokens) { return @() }
+
+    return $tokens |
+        Group-Object |
+        Sort-Object Count -Descending, Name |
+        Select-Object -First $Top |
+        Select-Object -ExpandProperty Name
+}
+
+function Get-KeyPhrases {
+    param([string]$Text, [int]$Top = 10)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+
+    $clean = $Text.ToLowerInvariant()
+    $clean = [regex]::Replace($clean, '[^a-z0-9\s\-]', ' ')
+    $tokens = $clean -split '\s+' | Where-Object {
+        $_ -and $_.Length -ge 3 -and $_ -notmatch '^\d+$'
+    }
+
+    if ($tokens.Count -lt 2) { return @() }
+
+    $phrases = @()
+    for ($i = 0; $i -lt ($tokens.Count - 1); $i++) {
+        $w1 = $tokens[$i]
+        $w2 = $tokens[$i + 1]
+        if ($StopWords -contains $w1 -or $StopWords -contains $w2) { continue }
+        if ($w1.Length -lt 3 -or $w2.Length -lt 3) { continue }
+        $phrases += "$w1 $w2"
+    }
+
+    if (-not $phrases) { return @() }
+
+    return $phrases |
+        Group-Object |
+        Sort-Object Count -Descending, Name |
+        Select-Object -First $Top |
+        Select-Object -ExpandProperty Name
+}
+
+function Get-SearchTags {
+    param([string[]]$Keywords, [string[]]$KeyPhrases, [int]$Max = 20)
+
+    $combined = @()
+    $combined += $KeyPhrases
+    $combined += $Keywords
+
+    return $combined |
+        Where-Object { $_ -and $_.Trim() -ne "" } |
+        Select-Object -Unique |
+        Select-Object -First $Max
+}
+
+function Get-ProcessingStatus([double]$sizeKB, [int]$wordCount, [int]$minSize, [int]$minWords) {
+    $needsOCR = ($sizeKB -lt $minSize -or $wordCount -lt $minWords)
+    $reason = @()
+
+    if ($sizeKB -lt $minSize) { $reason += "TXT under ${minSize}KB" }
+    if ($wordCount -lt $minWords) { $reason += "Word count under $minWords" }
+
+    [pscustomobject]@{
+        NeedsOCR = $needsOCR
+        Status   = $(if ($needsOCR) { "Needs OCR" } else { "Success" })
+        Reason   = ($reason -join "; ")
+    }
+}
+
+function Get-ContentQuality([double]$SizeKB, [int]$WordCount, [bool]$NeedsOCR) {
+    if ($NeedsOCR) { return "OCR Likely" }
+    if ($SizeKB -lt 10 -or $WordCount -lt 400) { return "Review" }
+    return "Good"
+}
+
+# =========================
+# CONNECT / PROVISION
+# =========================
+Connect-PnPOnline -Url $SiteUrl -Interactive
+Write-Log "Connected to $SiteUrl"
+
+Ensure-LibrarySchema
+
+$sourceList = Get-PnPList -Identity $SourceLibrary
+$sourceRoot = (Get-PnPProperty -ClientObject $sourceList -Property RootFolder).ServerRelativeUrl.TrimEnd("/")
+
+# =========================
+# GET FILES
+# =========================
+$pdfFiles = Get-PnPFolderItem -FolderSiteRelativeUrl $SourceLibrary -Recursive -ItemType File |
+    Where-Object { $_.Name -match '\.pdf$' }
+
+if ($OnlyFolder) {
+    $OnlyFolder = ($OnlyFolder -replace "\\","/").Trim("/")
+    $pdfFiles = $pdfFiles | Where-Object {
+        (Get-RelativeFolder $_.ServerRelativeUrl $sourceRoot).StartsWith($OnlyFolder, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+}
+
+if ($NameLike) {
+    $pdfFiles = $pdfFiles | Where-Object { $_.Name -like $NameLike }
+}
+
+if ($MaxFiles -gt 0) {
+    $pdfFiles = $pdfFiles | Select-Object -First $MaxFiles
+}
+
+Write-Log "Found $($pdfFiles.Count) PDF(s) to evaluate"
+
+# =========================
+# PROCESS
+# =========================
+$results = @()
+$word = $null
+$count = 0
+
+try {
+    if (-not $DryRun) {
+        $word = Start-Word
+    }
+
+    foreach ($file in $pdfFiles) {
+        $count++
+
+        if (-not $DryRun -and ($count % $RestartWordEvery) -eq 0) {
+            Write-Log "Restarting Word after $count files"
+            Stop-Word $word
+            $word = Start-Word
+        }
+
+        $sourceUrl = $file.ServerRelativeUrl
+        $fileName = $file.Name
+        $baseName = Safe-Name ([System.IO.Path]::GetFileNameWithoutExtension($fileName))
+        $relativeFolder = Get-RelativeFolder $sourceUrl $sourceRoot
+        $category = Get-Category $relativeFolder
+
+        $localDownloadFolder = Join-Path $DownloadRoot $relativeFolder
+        $localOutputFolder   = Join-Path $OutputRoot $relativeFolder
+        $localFailedFolder   = Join-Path $FailedRoot $relativeFolder
+
+        @($localDownloadFolder, $localOutputFolder, $localFailedFolder) | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                New-Item -Path $_ -ItemType Directory -Force | Out-Null
+            }
+        }
+
+        $localPdf     = Join-Path $localDownloadFolder $fileName
+        $localTxtName = "$baseName.txt"
+        $localTxt     = Join-Path $localOutputFolder $localTxtName
+        $targetFolder = if ($relativeFolder) { "$DestinationLibrary/$relativeFolder" } else { $DestinationLibrary }
+
+        $doc = $null
+
+        try {
+            Write-Log "Processing: $sourceUrl"
+
+            if ($DryRun) {
+                Write-Log "[DRY RUN] Would ensure folder: $targetFolder"
+            }
+            else {
+                Invoke-WithRetry -ActionName "Ensure folder $targetFolder" -ScriptBlock {
+                    Resolve-PnPFolder -SiteRelativePath $targetFolder | Out-Null
+                }
+            }
+
+            $sourceItem = Get-PnPFile -Url $sourceUrl -AsListItem
+
+            $sourceModified = $null
+            try { $sourceModified = [datetime]$sourceItem["Modified"] } catch {}
+
+            $sourceStatus = $null
+            try { $sourceStatus = $sourceItem["Status"] } catch {}
+
+            $documentType = $null
+            try { $documentType = $sourceItem["DocumentType"] } catch {}
+
+            $approved = $ApprovedStatuses -contains [string]$sourceStatus
+
+            if (-not $approved) {
+                $deletedUrl = Remove-DestinationFileIfExists -TargetFolder $targetFolder -FileName $localTxtName
+
+                Write-Log "Skipping non-approved source file: $sourceUrl [Status=$sourceStatus]"
+
+                $results += [pscustomobject]@{
+                    SourceFile         = $sourceUrl
+                    DestinationFile    = $deletedUrl
+                    Category           = $category
+                    Status             = "Skipped - not approved"
+                    ProcessingStatus   = "Skipped"
+                    SourceStatus       = $sourceStatus
+                    DocumentType       = $documentType
+                    NeedsOCR           = $null
+                    OCRReason          = ""
+                    WordCount          = $null
+                    SizeKB             = $null
+                    SourceModifiedDate = $sourceModified
+                    Keywords           = ""
+                    KeyPhrases         = ""
+                    SearchTags         = ""
+                    ContentQuality     = ""
+    
