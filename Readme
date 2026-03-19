@@ -330,3 +330,543 @@ Less maintenance
 
 
 Stick to the rules and this will scale cleanly.
+
+
+
+
+
+
+README - Lean SharePoint PDF → Cleaned TXT Pipeline
+
+Overview
+
+This solution converts approved PDFs from a source SharePoint library into cleaned TXT files in a destination library (Cleaned) for use in Copilot Studio.
+
+It is designed to be:
+
+Simple
+
+Consistent
+
+Hard for users to mess up
+
+
+
+---
+
+Core Rules (Non-Negotiable)
+
+1. Folder = Category
+
+Each document must live in ONE folder only
+
+Only one level deep
+
+No nested folders
+
+
+Example:
+
+RawPolicies/
+  HR/
+  IT/
+  Finance/
+
+2. Only Two Metadata Columns in Source
+
+Status (Choice)
+
+Draft
+
+Approved
+
+Archived
+
+
+Document Type (Choice)
+
+FAQ
+
+Policy
+
+Procedure
+
+Guidance
+
+Form
+
+
+That’s it. Nothing else.
+
+
+---
+
+Architecture
+
+Source Library (Raw)
+
+Stores original PDFs
+
+User-managed
+
+
+Destination Library (Cleaned)
+
+Auto-created by script
+
+Stores cleaned TXT files
+
+Used as Copilot knowledge source
+
+
+
+---
+
+Destination Library Schema
+
+Business Metadata
+
+Status (Choice)
+
+DocumentType (Choice)
+
+Category (Text)
+
+
+Processing Metadata
+
+SourcePath (Text)
+
+OriginalFileName (Text)
+
+NeedsOCR (Yes/No)
+
+ProcessingStatus (Choice)
+
+ProcessedDate (DateTime)
+
+SourceFileUrl (Text)
+
+SourceModifiedDate (DateTime)
+
+Keywords (Multi-line)
+
+KeyPhrases (Multi-line)
+
+SearchTags (Multi-line)
+
+ContentQuality (Choice)
+
+
+
+---
+
+Indexed Columns (Important)
+
+Index these in Cleaned:
+
+Status
+
+DocumentType
+
+Category
+
+NeedsOCR
+
+ProcessingStatus
+
+SourceModifiedDate
+
+ContentQuality
+
+
+
+---
+
+What the Script Does
+
+For Each File:
+
+1. Reads metadata from source
+
+
+2. Determines Category from folder
+
+
+3. Checks Status
+
+
+
+
+---
+
+If Status = Approved
+
+Download PDF
+
+Open in Word
+
+Remove:
+
+Images
+
+Headers/Footers
+
+Page numbers
+
+Repeated lines
+
+
+Extract clean text
+
+Generate:
+
+Keywords
+
+Key phrases
+
+Search tags
+
+
+Save as .txt
+
+Upload to Cleaned
+
+Overwrite if already exists
+
+Update metadata
+
+
+
+---
+
+If Status ≠ Approved
+
+Delete matching file from Cleaned (if exists)
+
+Skip processing
+
+
+
+---
+
+If File Unchanged
+
+Skip processing
+
+
+
+---
+
+Reprocessing Logic
+
+Scenario	Action
+
+New + Approved	Create file
+Updated + Approved	Reprocess + overwrite
+Unchanged + Approved	Skip
+No longer Approved	Delete from Cleaned
+
+
+
+---
+
+Output File Structure
+
+Each TXT file contains:
+
+[METADATA]
+Status: Approved
+DocumentType: Policy
+Category: HR
+...
+[/METADATA]
+
+[CONTENT]
+Cleaned text...
+
+
+---
+
+Why This Works Well
+
+No messy taxonomy
+
+No duplicate category logic
+
+Easy for users
+
+Predictable for AI retrieval
+
+Easy to filter in Copilot topics
+
+
+
+---
+
+User Instructions (Give Them This)
+
+1. Upload document
+
+
+2. Put it in the correct folder
+
+
+3. Set Status
+
+
+4. Set Document Type
+
+
+
+Done.
+
+If they can’t follow that, the system isn’t the problem.
+
+
+---
+
+Copilot Studio Usage
+
+Use Cleaned library only as knowledge source.
+
+To scope responses:
+
+Point topics to specific folders (categories)
+
+
+Example:
+
+HR topic → /Cleaned/HR
+
+IT topic → /Cleaned/IT
+
+
+
+---
+
+Final Notes
+
+This is intentionally strict.
+
+Loose systems create:
+
+Bad metadata
+
+Bad retrieval
+
+Bad answers
+
+
+Tight systems create:
+
+Predictable structure
+
+Better AI responses
+
+Less maintenance
+
+
+Stick to the rules and this will scale cleanly.
+
+
+---
+
+User Guide - Uploading Documents to the Source Library
+
+Welcome 👋
+
+This guide explains how to correctly upload documents so they can be processed and used by the Copilot assistant.
+
+Following these steps ensures:
+
+Accurate answers from the assistant
+
+Faster processing
+
+Less need for manual fixes
+
+
+
+---
+
+1. Folder Structure (Very Important)
+
+Each document must be placed in the correct category folder.
+
+Rules:
+
+Only one folder level deep
+
+Each folder represents a category
+
+Do not create folders inside folders
+
+
+Example:
+
+RawPolicies/
+  HR/
+  IT/
+  Finance/
+
+Good:
+
+HR/Annual Leave Policy.pdf
+
+
+Not allowed:
+
+HR/Leave/Annual Leave Policy.pdf
+
+Files directly in the root (no folder)
+
+
+
+---
+
+2. Required Metadata
+
+After uploading a file, you must complete both columns:
+
+Status (Required)
+
+Choose one:
+
+Draft → Not ready yet
+
+Approved → Ready to be used by the assistant
+
+Archived → No longer valid
+
+
+👉 Only Approved documents are used.
+
+
+---
+
+Document Type (Required)
+
+Choose one:
+
+FAQ
+
+Policy
+
+Procedure
+
+Guidance
+
+Form
+
+
+👉 Pick the closest match — don’t overthink it.
+
+
+---
+
+3. Accepted File Types
+
+Use these formats only:
+
+PDF (.pdf) ✅ Preferred
+
+Word (.docx)
+
+Text (.txt)
+
+
+Avoid:
+
+Images (.png, .jpg)
+
+PowerPoint (.pptx)
+
+Excel (.xlsx)
+
+
+👉 These formats don’t convert well into usable knowledge.
+
+
+---
+
+4. What Makes a “Good” Document
+
+The assistant works best with clean, text-based content.
+
+Best quality documents:
+
+Text-based PDFs (exported from Word)
+
+Minimal images
+
+Clear headings and structure
+
+Consistent formatting
+
+
+
+---
+
+Avoid if possible:
+
+Scanned PDFs (photos of documents)
+
+Documents with lots of images or diagrams
+
+Poorly formatted or messy layouts
+
+Screenshots pasted into documents
+
+
+👉 If you can highlight text in the PDF, it’s good. 👉 If you can’t, it likely needs OCR and may perform poorly.
+
+
+---
+
+5. Quick Upload Checklist ✅
+
+Before you finish:
+
+[ ] File is in the correct folder
+
+[ ] Status is set
+
+[ ] Document Type is set
+
+[ ] Document is text-based (not scanned)
+
+
+
+---
+
+6. Common Mistakes to Avoid
+
+Uploading files without setting metadata
+
+Creating extra folder levels
+
+Using inconsistent categories
+
+Leaving documents as Draft when they should be Approved
+
+
+
+---
+
+7. Final Tip
+
+Keep it simple.
+
+If a document is:
+
+In the right folder
+
+Marked as Approved
+
+Clearly written
+
+
+…it will work well in the assistant.
+
+If not — it won’t. Simple as that 
