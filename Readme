@@ -1,0 +1,332 @@
+README - Lean SharePoint PDF → Cleaned TXT Pipeline
+
+Overview
+
+This solution converts approved PDFs from a source SharePoint library into cleaned TXT files in a destination library (Cleaned) for use in Copilot Studio.
+
+It is designed to be:
+
+Simple
+
+Consistent
+
+Hard for users to mess up
+
+
+
+---
+
+Core Rules (Non-Negotiable)
+
+1. Folder = Category
+
+Each document must live in ONE folder only
+
+Only one level deep
+
+No nested folders
+
+
+Example:
+
+RawPolicies/
+  HR/
+  IT/
+  Finance/
+
+2. Only Two Metadata Columns in Source
+
+Status (Choice)
+
+Draft
+
+Approved
+
+Archived
+
+
+Document Type (Choice)
+
+FAQ
+
+Policy
+
+Procedure
+
+Guidance
+
+Form
+
+
+That’s it. Nothing else.
+
+
+---
+
+Architecture
+
+Source Library (Raw)
+
+Stores original PDFs
+
+User-managed
+
+
+Destination Library (Cleaned)
+
+Auto-created by script
+
+Stores cleaned TXT files
+
+Used as Copilot knowledge source
+
+
+
+---
+
+Destination Library Schema
+
+Business Metadata
+
+Status (Choice)
+
+DocumentType (Choice)
+
+Category (Text)
+
+
+Processing Metadata
+
+SourcePath (Text)
+
+OriginalFileName (Text)
+
+NeedsOCR (Yes/No)
+
+ProcessingStatus (Choice)
+
+ProcessedDate (DateTime)
+
+SourceFileUrl (Text)
+
+SourceModifiedDate (DateTime)
+
+Keywords (Multi-line)
+
+KeyPhrases (Multi-line)
+
+SearchTags (Multi-line)
+
+ContentQuality (Choice)
+
+
+
+---
+
+Indexed Columns (Important)
+
+Index these in Cleaned:
+
+Status
+
+DocumentType
+
+Category
+
+NeedsOCR
+
+ProcessingStatus
+
+SourceModifiedDate
+
+ContentQuality
+
+
+
+---
+
+What the Script Does
+
+For Each File:
+
+1. Reads metadata from source
+
+
+2. Determines Category from folder
+
+
+3. Checks Status
+
+
+
+
+---
+
+If Status = Approved
+
+Download PDF
+
+Open in Word
+
+Remove:
+
+Images
+
+Headers/Footers
+
+Page numbers
+
+Repeated lines
+
+
+Extract clean text
+
+Generate:
+
+Keywords
+
+Key phrases
+
+Search tags
+
+
+Save as .txt
+
+Upload to Cleaned
+
+Overwrite if already exists
+
+Update metadata
+
+
+
+---
+
+If Status ≠ Approved
+
+Delete matching file from Cleaned (if exists)
+
+Skip processing
+
+
+
+---
+
+If File Unchanged
+
+Skip processing
+
+
+
+---
+
+Reprocessing Logic
+
+Scenario	Action
+
+New + Approved	Create file
+Updated + Approved	Reprocess + overwrite
+Unchanged + Approved	Skip
+No longer Approved	Delete from Cleaned
+
+
+
+---
+
+Output File Structure
+
+Each TXT file contains:
+
+[METADATA]
+Status: Approved
+DocumentType: Policy
+Category: HR
+...
+[/METADATA]
+
+[CONTENT]
+Cleaned text...
+
+
+---
+
+Why This Works Well
+
+No messy taxonomy
+
+No duplicate category logic
+
+Easy for users
+
+Predictable for AI retrieval
+
+Easy to filter in Copilot topics
+
+
+
+---
+
+User Instructions (Give Them This)
+
+1. Upload document
+
+
+2. Put it in the correct folder
+
+
+3. Set Status
+
+
+4. Set Document Type
+
+
+
+Done.
+
+If they can’t follow that, the system isn’t the problem.
+
+
+---
+
+Copilot Studio Usage
+
+Use Cleaned library only as knowledge source.
+
+To scope responses:
+
+Point topics to specific folders (categories)
+
+
+Example:
+
+HR topic → /Cleaned/HR
+
+IT topic → /Cleaned/IT
+
+
+
+---
+
+Final Notes
+
+This is intentionally strict.
+
+Loose systems create:
+
+Bad metadata
+
+Bad retrieval
+
+Bad answers
+
+
+Tight systems create:
+
+Predictable structure
+
+Better AI responses
+
+Less maintenance
+
+
+Stick to the rules and this will scale cleanly.
