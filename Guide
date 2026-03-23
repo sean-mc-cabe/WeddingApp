@@ -1,0 +1,774 @@
+# HR Copilot Studio Agent — Full Build Guide
+
+**Version:** 1.0  
+**Stack:** Microsoft 365, SharePoint Online, Power Automate, AI Builder, Copilot Studio  
+**Scope:** SharePoint schema, Power Automate flows, Copilot Studio configuration
+
+---
+
+## Table of Contents
+
+1. [Solution Overview](#1-solution-overview)
+2. [Prerequisites](#2-prerequisites)
+3. [SharePoint Site Setup](#3-sharepoint-site-setup)
+4. [Library 1 — HR Staging](#4-library-1--hr-staging)
+5. [Library 2 — Agent Knowledge](#5-library-2--agent-knowledge)
+6. [Supporting Lists](#6-supporting-lists)
+7. [Power Automate — Flow 1: Document Enrichment Pipeline](#7-power-automate--flow-1-document-enrichment-pipeline)
+8. [Power Automate — Flow 2: Status Sync & Removal Flow](#8-power-automate--flow-2-status-sync--removal-flow)
+9. [Power Automate — Flow 3: Review Date Reminder](#9-power-automate--flow-3-review-date-reminder)
+10. [Copilot Studio Configuration](#10-copilot-studio-configuration)
+11. [Testing Checklist](#11-testing-checklist)
+12. [Reuse Guide — Deploying for Other Domains](#12-reuse-guide--deploying-for-other-domains)
+
+---
+
+## 1. Solution Overview
+
+### Architecture
+
+```
+HR STAFF                   PIPELINE                        AGENT
+────────                   ────────                        ─────
+
+Upload document    ──▶    Validate file type
+Fill 6 fields      ──▶    Check for scanned PDF
+                          Detect duplicates
+                          Generate AI description
+                          Generate AI keywords
+                          Confidence score check
+                          Copy enriched doc         ──▶   Copilot Studio
+                          to Library 2                    points ONLY at
+                                                          Library 2
+
+Change Status      ──▶    Status Sync Flow
+in Library 1              removes doc from
+(to anything              Library 2 immediately
+other than
+Published)
+```
+
+### Flow Summary
+
+| Flow | Trigger | Purpose |
+|------|---------|---------|
+| Enrichment Pipeline | New file in Library 1 | Validate, enrich, publish to Library 2 |
+| Status Sync | Item modified in Library 1 | Remove from Library 2 when status != Published |
+| Review Reminder | Daily schedule | Notify document owner 30 days before review date |
+
+---
+
+## 2. Prerequisites
+
+Before starting, confirm the following are available:
+
+| Requirement | Where to Check |
+|-------------|---------------|
+| SharePoint Online site collection admin rights | M365 Admin Centre |
+| Power Automate Premium licence (per user or per flow) | M365 Admin Centre |
+| AI Builder credits allocated to environment | Power Platform Admin Centre |
+| Copilot Studio licence | M365 Admin Centre |
+| Power Platform environment (Production recommended) | Power Platform Admin Centre |
+
+> **AI Builder note:** AI Builder Prompt actions require Power Automate Premium. Most organisations have this via Microsoft 365 E3/E5 or via standalone Power Automate Premium licences. Verify before building.
+
+---
+
+## 3. SharePoint Site Setup
+
+### 3.1 Create the SharePoint Site
+
+1. Navigate to **SharePoint Admin Centre** → **Active Sites** → **Create**
+2. Select **Team site**
+3. Configure:
+   - **Site name:** `HR-Copilot-Knowledge`
+   - **Site address:** `/sites/HR-Copilot-Knowledge`
+   - **Primary admin:** HR Systems owner
+   - **Additional owners:** IT admin responsible for flows
+4. Click **Create**
+
+### 3.2 Set Site Permissions
+
+| Group | Permission Level | Who |
+|-------|----------------|-----|
+| HR Staging Contributors | Contribute | All HR staff who upload documents |
+| HR Admins | Full Control | HR systems team |
+| Pipeline Service Account | Full Control | Account used by Power Automate |
+| Agent Read Group | Read | All staff (for agent access) |
+
+> **Recommended:** Use a dedicated service account or managed identity for Power Automate connections rather than an individual's account. This prevents flows breaking when staff leave.
+
+### 3.3 Create Folder Structure
+
+Within the site, create the following folders manually:
+
+```
+HR-Copilot-Knowledge (Site)
+│
+├── Library 1 — HR Staging
+│     ├── /Pending
+│     ├── /Rejected
+│     └── /Needs-Review
+│
+├── Library 2 — Agent Knowledge
+│     ├── /Active
+│     └── /Removed
+│
+├── Pipeline Audit Log (List)
+└── Rejected Documents Register (List)
+```
+
+---
+
+## 4. Library 1 — HR Staging
+
+This is the human-facing upload library. HR staff interact only with this library.
+
+### 4.1 Create the Library
+
+1. In the site, click **New** → **Document Library**
+2. Name: `HR Staging`
+3. Click **Create**
+
+### 4.2 Add Columns
+
+Navigate to **Library Settings** → **Create Column** for each of the following.
+
+---
+
+#### TIER 1 — Core Columns (all required)
+
+**Column 1: Document_Title**
+- Type: `Single line of text`
+- Name: `Document_Title`
+- Required: Yes
+- Description: `Friendly display name for the document`
+
+**Column 2: Domain**
+- Type: `Choice`
+- Name: `Domain`
+- Required: Yes
+- Choices:
+  ```
+  HR
+  IT
+  Finance
+  Legal
+  Facilities
+  Operations
+  ```
+- Default value: `HR`
+
+**Column 3: Document_Type**
+- Type: `Choice`
+- Name: `Document_Type`
+- Required: Yes
+- Choices:
+  ```
+  Policy
+  Procedure
+  Form
+  FAQ
+  Guidance
+  Reference
+  ```
+
+**Column 4: Audience**
+- Type: `Choice`
+- Name: `Audience`
+- Required: Yes
+- Choices:
+  ```
+  All Staff
+  Managers
+  Department Only
+  HR Admin Only
+  ```
+
+**Column 5: Effective_Date**
+- Type: `Date and Time`
+- Name: `Effective_Date`
+- Required: Yes
+- Format: `Date only`
+
+**Column 6: Review_Date**
+- Type: `Date and Time`
+- Name: `Review_Date`
+- Required: Yes
+- Format: `Date only`
+
+**Column 7: Document_Owner**
+- Type: `Person or Group`
+- Name: `Document_Owner`
+- Required: Yes
+- Allow multiple: No
+- Description: `Person accountable for this document's accuracy`
+
+---
+
+#### TIER 2 — Pipeline Status Columns (system managed — set as read-only for contributors)
+
+**Column 8: Pipeline_Status**
+- Type: `Choice`
+- Name: `Pipeline_Status`
+- Required: No (set by flow)
+- Choices:
+  ```
+  Pending
+  Processing
+  Published
+  Failed
+  Needs Review
+  Duplicate Review
+  Rejected
+  ```
+- Default value: `Pending`
+
+**Column 9: Rejection_Reason**
+- Type: `Single line of text`
+- Name: `Rejection_Reason`
+- Required: No
+
+**Column 10: Published_Date**
+- Type: `Date and Time`
+- Name: `Published_Date`
+- Required: No
+- Format: `Date and Time`
+
+**Column 11: AI_Confidence**
+- Type: `Choice`
+- Name: `AI_Confidence`
+- Required: No
+- Choices:
+  ```
+  High
+  Medium
+  Low
+  ```
+
+**Column 12: AI_Confidence_Reason**
+- Type: `Single line of text`
+- Name: `AI_Confidence_Reason`
+- Required: No
+
+---
+
+#### TIER 3 — Domain-Specific Columns
+
+**Column 13: HR_Topic**
+- Type: `Choice`
+- Name: `HR_Topic`
+- Required: No
+- Choices:
+  ```
+  Leave
+  Pay
+  Conduct
+  Benefits
+  Onboarding
+  Offboarding
+  Recruitment
+  Learning & Development
+  Health & Safety
+  Equality & Diversity
+  ```
+
+> Note: Tier 3 columns are optional at upload. The AI enrichment will help categorise where staff leave these blank.
+
+### 4.3 Create a Default View for HR Staff
+
+1. Go to **Library Settings** → **Create View**
+2. Name: `My Submissions`
+3. Columns to show:
+   - Document_Title
+   - Document_Type
+   - HR_Topic
+   - Pipeline_Status
+   - AI_Confidence
+   - Published_Date
+   - Review_Date
+4. Filter: `Submitted_By` is equal to `[Me]`
+5. Set as default view for contributors
+
+### 4.4 Create an Admin View
+
+1. Create another view named `All Documents — Admin`
+2. Show all columns
+3. No filter
+4. Set as visible to HR Admins group only
+
+---
+
+## 5. Library 2 — Agent Knowledge
+
+This library is the Copilot Studio knowledge source. HR staff have read-only access. Only Power Automate writes here.
+
+### 5.1 Create the Library
+
+1. Click **New** → **Document Library**
+2. Name: `Agent Knowledge`
+3. Click **Create**
+
+### 5.2 Set Permissions
+
+1. Go to **Library Settings** → **Permissions for this document library**
+2. **Stop inheriting permissions**
+3. Set:
+   - HR Staging Contributors: `Read`
+   - HR Admins: `Full Control`
+   - Pipeline Service Account: `Full Control`
+   - Agent Read Group: `Read`
+
+### 5.3 Add Columns
+
+Create the same Tier 1 columns as Library 1, plus the following additional columns:
+
+**Column 1–13:** Replicate all columns from Library 1 exactly (same names, same types, same choices)
+
+Then add:
+
+**Column 14: AI_Description**
+- Type: `Multiple lines of text`
+- Name: `AI_Description`
+- Required: No
+- Plain text (not enhanced rich text)
+
+**Column 15: AI_Keywords**
+- Type: `Multiple lines of text`
+- Name: `AI_Keywords`
+- Required: No
+
+**Column 16: Source_Document_ID**
+- Type: `Single line of text`
+- Name: `Source_Document_ID`
+- Required: No
+- Description: `ID of the corresponding item in Library 1`
+
+**Column 17: Enrichment_Version**
+- Type: `Single line of text`
+- Name: `Enrichment_Version`
+- Default value: `v1.0`
+
+### 5.4 Default View for Agent Knowledge
+
+Create a view named `Active Documents`:
+- Filter: `Pipeline_Status` is equal to `Published`
+- This is the view Copilot Studio should reference
+
+---
+
+## 6. Supporting Lists
+
+### 6.1 Pipeline Audit Log
+
+1. Click **New** → **List**
+2. Name: `Pipeline Audit Log`
+3. Add columns:
+
+| Column Name | Type | Notes |
+|-------------|------|-------|
+| `Title` | Single line (default) | Auto: Document filename |
+| `Source_Document_ID` | Single line | Library 1 item ID |
+| `Run_Timestamp` | Date and Time | When pipeline ran |
+| `Outcome` | Choice | Published, Failed, Rejected, Duplicate, Needs Review |
+| `Confidence_Score` | Choice | High, Medium, Low |
+| `Confidence_Reason` | Single line | AI reasoning |
+| `Rejection_Reason` | Single line | If applicable |
+| `Enrichment_Version` | Single line | Prompt version used |
+| `Submitted_By` | Person | From Library 1 |
+
+### 6.2 Rejected Documents Register
+
+1. Click **New** → **List**
+2. Name: `Rejected Documents Register`
+3. Add columns:
+
+| Column Name | Type | Notes |
+|-------------|------|-------|
+| `Title` | Single line (default) | Document filename |
+| `Rejection_Date` | Date and Time | Auto |
+| `Rejection_Reason` | Single line | Auto from flow |
+| `Rejection_Type` | Choice | Wrong File Type, Scanned PDF, Low Confidence, Duplicate |
+| `Submitted_By` | Person | Auto |
+| `Document_Owner` | Person | From Library 1 |
+| `Resolution_Status` | Choice | Pending, Resolved, Dismissed |
+| `Resolution_Notes` | Multiple lines | HR admin notes |
+
+---
+
+## 7. Power Automate — Flow 1: Document Enrichment Pipeline
+
+### Overview
+
+**Trigger:** When a new file is created in Library 1  
+**Purpose:** Validate, enrich, and publish document to Library 2
+
+---
+
+### 7.1 Create the Flow
+
+1. Go to **Power Automate** → **Create** → **Automated cloud flow**
+2. Name: `HR — Document Enrichment Pipeline`
+3. Trigger: `SharePoint — When a file is created (properties only)`
+4. Configure trigger:
+   - Site Address: `[Your HR Copilot Knowledge site URL]`
+   - Library Name: `HR Staging`
+
+---
+
+### 7.2 Action 1 — Initialize Variables
+
+Add a **Parallel Branch** with the following variable initializations (run together):
+
+```
+Initialize variable — varFileExtension
+  Name: varFileExtension
+  Type: String
+  Value: (empty)
+
+Initialize variable — varExtractedText
+  Name: varExtractedText
+  Type: String
+  Value: (empty)
+
+Initialize variable — varAIDescription
+  Name: varAIDescription
+  Type: String
+  Value: (empty)
+
+Initialize variable — varAIKeywords
+  Name: varAIKeywords
+  Type: String
+  Value: (empty)
+
+Initialize variable — varConfidence
+  Name: varConfidence
+  Type: String
+  Value: (empty)
+
+Initialize variable — varConfidenceReason
+  Name: varConfidenceReason
+  Type: String
+  Value: (empty)
+
+Initialize variable — varIsDuplicate
+  Name: varIsDuplicate
+  Type: Boolean
+  Value: false
+```
+
+---
+
+### 7.3 Action 2 — Set Pipeline Status to Processing
+
+```
+SharePoint — Update file properties
+  Site Address: [Site URL]
+  Library Name: HR Staging
+  ID: [ID from trigger]
+  Pipeline_Status: Processing
+```
+
+---
+
+### 7.4 Action 3 — Get File Content
+
+```
+SharePoint — Get file content
+  Site Address: [Site URL]
+  File Identifier: [Identifier from trigger — use the ID field]
+```
+
+---
+
+### 7.5 Action 4 — Set File Extension Variable
+
+```
+Set variable — varFileExtension
+  Value: 
+  toLower(last(split(triggerOutputs()?['body/{FilenameWithExtension}'], '.')))
+```
+
+---
+
+### 7.6 Action 5 — File Type Validation (Condition)
+
+```
+Condition:
+  varFileExtension — is not equal to — pdf
+  AND
+  varFileExtension — is not equal to — docx
+  AND
+  varFileExtension — is not equal to — doc
+  AND
+  varFileExtension — is not equal to — xlsx
+```
+
+**If TRUE (unsupported file type) — Rejection Branch A:**
+
+```
+Step A1 — SharePoint: Update file properties
+  Pipeline_Status: Rejected
+  Rejection_Reason: Unsupported file type. Please upload PDF or DOCX only.
+
+Step A2 — SharePoint: Move file
+  Current site: [Site URL]
+  Current library: HR Staging
+  File to move: [Full path from trigger]
+  Destination site: [Site URL]
+  Destination path: /HR Staging/Rejected
+
+Step A3 — SharePoint: Create item (Rejected Documents Register)
+  Title: [FilenameWithExtension from trigger]
+  Rejection_Date: utcNow()
+  Rejection_Reason: Unsupported file type
+  Rejection_Type: Wrong File Type
+  Submitted_By: [Created By from trigger]
+  Resolution_Status: Pending
+
+Step A4 — Office 365 Outlook: Send an email
+  To: [Created By Email from trigger]
+  Subject: Document upload rejected — @{triggerOutputs()?['body/{FilenameWithExtension}']}
+  Body:
+    Hi @{triggerOutputs()?['body/{Author/DisplayName}']},
+
+    Your document could not be processed.
+
+    Document: @{triggerOutputs()?['body/{FilenameWithExtension}']}
+    Reason: File type not supported.
+
+    Please re-upload your document as a PDF or DOCX file.
+
+    If you need assistance, please contact the HR systems team.
+
+    This is an automated message.
+
+Step A5 — Terminate
+  Status: Succeeded
+```
+
+**If FALSE — continue to next step**
+
+---
+
+### 7.7 Action 6 — Extract Text from Document
+
+```
+AI Builder — Extract text from file
+  File: [File Content from Action 3]
+
+→ Output stored in expression for next step:
+  outputs('Extract_text_from_file')?['text']
+```
+
+```
+Set variable — varExtractedText
+  Value: outputs('Extract_text_from_file')?['text']
+```
+
+---
+
+### 7.8 Action 7 — Scanned PDF / Empty Document Check (Condition)
+
+```
+Condition:
+  length(variables('varExtractedText')) — is less than — 500
+```
+
+**If TRUE (likely scanned or empty) — Rejection Branch B:**
+
+```
+Step B1 — SharePoint: Update file properties
+  Pipeline_Status: Needs Review
+  Rejection_Reason: Document appears to be a scanned PDF or contains no readable text.
+
+Step B2 — SharePoint: Move file
+  Destination path: /HR Staging/Needs-Review
+
+Step B3 — SharePoint: Create item (Rejected Documents Register)
+  Title: [Filename]
+  Rejection_Type: Scanned PDF
+  Rejection_Reason: Fewer than 500 characters extracted. Likely scanned PDF.
+  Resolution_Status: Pending
+
+Step B4 — Office 365 Outlook: Send an email
+  To: [Created By Email]
+  Subject: Document needs attention — @{triggerOutputs()?['body/{FilenameWithExtension}']}
+  Body:
+    Hi @{triggerOutputs()?['body/{Author/DisplayName}']},
+
+    Your document could not be automatically processed.
+
+    Document: @{triggerOutputs()?['body/{FilenameWithExtension}']}
+    Reason: The document appears to be a scanned PDF or contains no 
+    readable text. Our system requires text-based documents to generate 
+    metadata automatically.
+
+    Please re-upload a text-based PDF or DOCX version of this document.
+    If this document must remain as a scanned PDF, please contact the 
+    HR systems team for manual processing.
+
+    This is an automated message.
+
+Step B5 — Terminate
+  Status: Succeeded
+```
+
+**If FALSE — continue**
+
+---
+
+### 7.9 Action 8 — Duplicate Detection
+
+```
+SharePoint — Get items
+  Site Address: [Site URL]
+  List Name: Agent Knowledge
+  Filter Query: 
+    Document_Title eq '@{triggerOutputs()?['body/{FilenameWithExtension}']}'
+    and Pipeline_Status eq 'Published'
+  Top Count: 1
+```
+
+```
+Condition:
+  length(outputs('Get_items')?['body/value']) — is greater than — 0
+```
+
+**If TRUE (duplicate found):**
+
+```
+Step C1 — Set variable: varIsDuplicate = true
+
+Step C2 — SharePoint: Update file properties (Library 1)
+  Pipeline_Status: Duplicate Review
+  Rejection_Reason: A published document with this name already exists in the knowledge base.
+
+Step C3 — SharePoint: Create item (Rejected Documents Register)
+  Rejection_Type: Duplicate
+  Resolution_Status: Pending
+
+Step C4 — Office 365 Outlook: Send an email
+  To: [Created By Email]
+  CC: [Document_Owner from trigger if different]
+  Subject: Duplicate document detected — @{triggerOutputs()?['body/{FilenameWithExtension}']}
+  Body:
+    Hi @{triggerOutputs()?['body/{Author/DisplayName}']},
+
+    A published version of this document already exists in the 
+    knowledge base.
+
+    Document: @{triggerOutputs()?['body/{FilenameWithExtension}']}
+
+    If this is an updated version, please:
+    1. Locate the existing document in the Agent Knowledge library
+    2. Set its status to Archived in Library 1 first
+    3. Then re-upload your new version
+
+    If you believe this is an error, please contact the HR systems team.
+
+Step C5 — Terminate
+  Status: Succeeded
+```
+
+**If FALSE — continue**
+
+---
+
+### 7.10 Action 9 — AI Builder Enrichment Prompt
+
+```
+AI Builder — Create text with GPT using a prompt
+```
+
+**Prompt text (paste exactly):**
+
+```
+You are an HR document metadata assistant. Your job is to analyse 
+HR documents and generate accurate, searchable metadata.
+
+Analyse the following document text and return ONLY a valid JSON 
+object. No preamble, no explanation, no markdown formatting, 
+no code fences. Return the raw JSON object only.
+
+{
+  "description": "A 2-3 sentence plain English summary of what this document covers, 
+                  who it applies to, and what actions or information it provides. 
+                  Begin with the document type and primary topic.",
+  "keywords": "A comma-separated list of 10-15 keywords and phrases that an employee 
+               would realistically type when searching for this document. Include 
+               synonyms and related terms.",
+  "confidence": "HIGH, MEDIUM, or LOW based on how clearly the document text 
+                 allowed you to generate accurate metadata",
+  "confidence_reason": "One sentence explaining your confidence rating. 
+                        Write 'N/A' if confidence is HIGH."
+}
+
+Rules:
+- Description must be factual, not promotional
+- Keywords must reflect real employee search behaviour
+- If the document text is fragmentary, heavily formatted, or unclear, 
+  set confidence to LOW and explain why
+- If document text appears to be a form with mostly blank fields, 
+  set confidence to LOW
+
+DOCUMENT TEXT (first 5000 characters):
+@{substring(variables('varExtractedText'), 0, min(5000, length(variables('varExtractedText'))))}
+```
+
+> Store the response in a variable: `varAIRawResponse`
+
+---
+
+### 7.11 Action 10 — Parse AI Response
+
+```
+Data Operations — Parse JSON
+  Content: @{outputs('Create_text_with_GPT_using_a_prompt')?['text']}
+  Schema:
+  {
+    "type": "object",
+    "properties": {
+      "description": { "type": "string" },
+      "keywords": { "type": "string" },
+      "confidence": { "type": "string" },
+      "confidence_reason": { "type": "string" }
+    }
+  }
+```
+
+```
+Set variable — varAIDescription
+  Value: [description from Parse JSON]
+
+Set variable — varAIKeywords
+  Value: [keywords from Parse JSON]
+
+Set variable — varConfidence
+  Value: [confidence from Parse JSON]
+
+Set variable — varConfidenceReason
+  Value: [confidence_reason from Parse JSON]
+```
+
+---
+
+### 7.12 Action 11 — Confidence Check (Condition)
+
+```
+Condition:
+  varConfidence — is equal to — LOW
+```
+
+**If TRUE:**
+
+```
+Step D1 — SharePoint: Update file properties (Library 1)
+  Pipeline_Status: Needs Review
+  AI_Confidence: Low
+  AI_Confidence_Reason: [varConfidenceReason]
+
+Step D2 — Office 365 Outlook: Send an email
+  To: [Document_Owner from trigger]
+  CC: HR Admin mailbox
+  Subject: Document requires review before publishing
