@@ -1,0 +1,443 @@
+================================================================================
+FAQ GENERATION FLOW - BUILD GUIDE
+Steps 1 to 3: Prompt, Parse, Excel
+================================================================================
+
+
+--------------------------------------------------------------------------------
+SECTION 1 - ADDING THE AI BUILDER PROMPT
+--------------------------------------------------------------------------------
+
+BEFORE YOU START
+Create the custom prompt in AI Builder first, then come back to wire it in.
+
+  1a. Go to make.powerapps.com
+  1b. Navigate to AI Builder > Prompts > New prompt
+  1c. Name it: FAQ Generator
+  1d. Paste the full prompt text from the PROMPT section at the bottom of
+      this file
+  1e. Add two inputs:
+        - Name: documentName    Type: Text
+        - Name: documentFile    Type: File
+  1f. Save the prompt
+
+
+REPLACE COMPOSE IN THE WORD BRANCH (True branch)
+
+  Your current structure:
+    Convert Word Document to PDF
+    > Compose                         <-- replace this
+    > Set varResponseJSON Word
+
+  Steps:
+  1. Delete the existing Compose action in the Word branch
+  2. In its place, add action: AI Builder > Create text with GPT
+     (search for "Run a prompt" or "Create text using a prompt")
+  3. Select your saved prompt: FAQ Generator
+  4. Wire the inputs:
+       - documentName = FileNameWithExtension
+         (from trigger: triggerOutputs()?['body/{FilenameWithExtension}'])
+       - documentFile = File content from Convert Word Document to PDF
+         (use the 'File content' output of the conversion action)
+  5. Leave Set varResponseJSON Word in place - update its value in step below
+
+
+REPLACE COMPOSE IN THE PDF BRANCH (False branch)
+
+  Your current structure:
+    Get file content 1
+    > Compose 1                       <-- replace this
+    > Set varResponseJSON PDF
+
+  Steps:
+  1. Delete Compose 1 in the PDF branch
+  2. Add action: AI Builder > Create text with GPT
+  3. Select prompt: FAQ Generator
+  4. Wire the inputs:
+       - documentName = FileNameWithExtension
+         (same trigger expression as above)
+       - documentFile = File content from Get file content 1
+         (use the 'File content' output of that action)
+  5. Leave Set varResponseJSON PDF in place - update below
+
+
+UPDATE BOTH SET VARIABLE ACTIONS
+
+  In both branches, update the Set varResponseJSON action value to:
+
+    outputs('Create_text_with_GPT')?['body/predictionOutput/text']
+
+  NOTE: The exact action name in the expression depends on what Power Automate
+  auto-names your AI Builder action. If you have two AI Builder actions,
+  they will be named differently - check the action name in the expression
+  builder and match it exactly.
+
+  Typical output path for AI Builder custom prompts:
+    outputs('ACTION_NAME')?['body/predictionOutput/text']
+
+
+--------------------------------------------------------------------------------
+SECTION 2 - CLEANING AND PARSING THE JSON RESPONSE
+--------------------------------------------------------------------------------
+
+Add these two actions AFTER the Condition block (after both branches merge),
+using the varResponseJSON variable which now holds the AI Builder output.
+
+
+STEP 2.1 - COMPOSE: CLEAN THE RESPONSE
+
+  Action: Data Operations > Compose
+  Name it: Compose_CleanJSON
+
+  Expression value (paste into expression editor):
+    trim(replace(replace(variables('varResponseJSON'),concat('`','`','`','json'),''),concat('`','`','`'),''))
+
+  What this does: strips any markdown code fences the model may have wrapped
+  around the JSON before you try to parse it. Without this, Parse JSON fails.
+
+  NOTE: Backtick characters cannot be typed directly in the Power Automate
+  expression editor. The concat approach above constructs them safely.
+  Alternatively paste this version if your editor accepts backticks directly:
+    trim(replace(replace(variables('varResponseJSON'),'```json',''),'```',''))
+
+
+STEP 2.2 - PARSE JSON
+
+  Action: Data Operations > Parse JSON
+  Name it: Parse_FAQ_JSON
+
+  Content: outputs('Compose_CleanJSON')
+
+  Schema (paste this in full):
+
+  {
+    "type": "array",
+    "items": {
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "expectedAnswer": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "category",
+        "question",
+        "expectedAnswer",
+        "confidence"
+      ]
+    }
+  }
+
+  TIP: If the AI Builder response is empty or malformed, Parse JSON will fail.
+  Wrap this action (and everything after it) in a Scope action so you can
+  configure error handling. Set a parallel branch with "Configure run after >
+  Has failed" to update a status column or send an alert email.
+
+
+--------------------------------------------------------------------------------
+SECTION 3 - GENERATING THE EXCEL FILE
+--------------------------------------------------------------------------------
+
+STEP 3.1 - GET THE EXCEL TEMPLATE
+
+  Action: SharePoint > Get file content
+  Name it: Get_Excel_Template
+
+  Site Address: [your SharePoint site]
+  File Identifier: /Frequently Asked Questions/Templates/FAQ_Template.xlsx
+
+  NOTE: Use the full relative path from the root of the site, not from a
+  library. Adjust to match your actual folder structure.
+
+
+STEP 3.2 - CREATE THE OUTPUT EXCEL FILE
+
+  Action: SharePoint > Create file
+  Name it: Create_FAQ_Excel
+
+  Site Address: [your SharePoint site]
+
+  Folder Path: /Frequently Asked Questions/Output
+  (This is the destination folder only - do not include the filename here)
+
+  If routing by Business Unit, use this expression in the Folder Path field:
+    concat('/FAQ Outputs/', triggerBody()?['{BusinessUnit}'])
+
+  File Name (expression - paste into expression editor):
+    concat(
+      replace(
+        replace(
+          triggerOutputs()?['body/{FilenameWithExtension}'],
+          '.pdf',
+          ''
+        ),
+        '.docx',
+        ''
+      ),
+      '_FAQs_',
+      formatDateTime(utcNow(), 'yyyy-MM-dd'),
+      '.xlsx'
+    )
+
+  NOTE: Both .pdf and .docx extensions are stripped. The Word branch converts
+  to PDF inside the flow but the trigger filename is still the original .docx,
+  so both must be handled.
+
+  File Content: outputs('Get_Excel_Template')?['body']
+
+  This copies your formatted template (with headers, table, and conditional
+  formatting intact) and saves it as a new named file.
+
+
+STEP 3.3 - POPULATE THE EXCEL TABLE
+
+  Action: Control > Apply to each
+  Input: body('Parse_FAQ_JSON')
+
+  Inside the loop, add:
+  Action: Excel Online (Business) > Add a row into a table
+
+    Location: [your SharePoint site URL]
+    Document Library: [your document library name]
+    File: outputs('Create_FAQ_Excel')?['body/Id']
+    Table: FAQTable    <-- must match the exact table name in your template
+
+    Column mappings:
+      Category        = items()?['category']
+      Question        = items()?['question']
+      ExpectedAnswer  = items()?['expectedAnswer']
+      Confidence      = items()?['confidence']
+
+  IMPORTANT: The File field in the Excel action requires the SharePoint
+  file ID returned by the Create file action, not a path. Use the expression
+  above to reference it. If you hard-code a path here it will break.
+
+  IMPORTANT: Your Excel table must be a proper formatted Table object
+  (Insert > Table in Excel), not just a header row. If it is not a Table,
+  the "Add a row" action will not find it. Verify the table is named
+  FAQTable in Excel under Table Design > Table Name.
+
+
+STEP 3.4 - GET A SHARING LINK
+
+  Action: SharePoint > Create sharing link for a file or folder
+  Name it: Get_Sharing_Link
+
+  Site Address: [your SharePoint site]
+  Library name: [your document library]
+  Item Id: outputs('Create_FAQ_Excel')?['body/ItemId']
+  Link type: Organization view
+
+  This generates a direct link to the completed Excel file for the email.
+
+
+STEP 3.5 - SEND EMAIL NOTIFICATION
+
+  Action: Office 365 Outlook > Send an email (V2)
+
+  To:
+    triggerOutputs()?['body/Editor/Email']
+
+    NOTE: This gets the email of the person who uploaded the file from the
+    trigger metadata. Test this field first - if it returns empty, fall back
+    to: triggerOutputs()?['body/Author/Email']
+
+  Subject:
+    concat('Your FAQ document is ready - ',
+    triggerOutputs()?['body/{FilenameWithExtension}'])
+
+  Body - set Is HTML to Yes in the email action, then paste this expression:
+    concat(
+      '<p>Hi,</p>',
+      '<p>Your FAQ set has been generated and is ready for review.</p>',
+      '<p><strong>Document processed:</strong> ',
+      triggerOutputs()?['body/{FilenameWithExtension}'],
+      '</p>',
+      '<p><a href="',
+      outputs('Get_Sharing_Link')?['body/sharingLink/webUrl'],
+      '">Open your FAQ file</a></p>',
+      '<p>Any entries highlighted in red are low confidence and should be ',
+      'reviewed before use in agent training or evaluation.</p>',
+      '<p>This file was generated automatically.</p>'
+    )
+
+  NOTE: HTML tags are used here instead of \n sequences. Power Automate does
+  not interpret \n as line breaks inside string expressions - it outputs the
+  literal characters \n. Set Is HTML to Yes on the email action.
+
+
+--------------------------------------------------------------------------------
+EXPRESSIONS QUICK REFERENCE
+--------------------------------------------------------------------------------
+
+Get uploaded file name:
+  triggerOutputs()?['body/{FilenameWithExtension}']
+
+Get uploader email:
+  triggerOutputs()?['body/Editor/Email']
+
+Get AI Builder output text:
+  outputs('YOUR_AI_BUILDER_ACTION_NAME')?['body/predictionOutput/text']
+
+Get created Excel file ID (for Excel connector actions):
+  outputs('Create_FAQ_Excel')?['body/Id']
+
+Get created Excel file item ID (for sharing link):
+  outputs('Create_FAQ_Excel')?['body/ItemId']
+
+Today's date formatted:
+  formatDateTime(utcNow(), 'yyyy-MM-dd')
+
+Parse JSON output for Apply to Each:
+  body('Parse_FAQ_JSON')
+
+
+--------------------------------------------------------------------------------
+AI BUILDER PROMPT - FULL TEXT
+(Paste into AI Builder > FAQ Generator > Prompt field)
+--------------------------------------------------------------------------------
+
+You are an FAQ generation engine. Your sole purpose is to read a document and
+produce high-quality FAQ entries formatted as a JSON array.
+
+**Source Document:** [documentName]
+
+---
+
+**YOUR TASK**
+
+Read the document provided. Generate between 2 and 30 FAQ entries based ONLY
+on the information present in the document. Distribute questions across the
+document's topics - do not front-load all questions from the opening section
+and neglect the rest.
+
+For each distinct topic or section in the document, generate between 2 and 15
+questions depending on the informational density of that section.
+
+If the document contains no meaningful informational content (e.g. it is a
+blank file, a table of contents only, or consists entirely of formatting
+artefacts), return exactly: []
+
+---
+
+**RULES - READ ALL BEFORE GENERATING**
+
+**Rule 1: Grounding**
+Every answer must be drawn directly from the document. Do not use external
+knowledge. Do not infer facts that are not stated or clearly implied.
+
+**Rule 2: Question Phrasing**
+Write questions exactly as a real person would type them into a chat window.
+Conversational. Lowercase unless proper nouns. Natural phrasing. Never formal,
+never bureaucratic, never robotic.
+
+GOOD question examples:
+- what's the notice period for terminating this contract?
+- who approves budget requests over 10,000 GBP?
+- what are our obligations if there's a data breach?
+- how long does the onboarding process take?
+- what happens if a supplier misses a delivery deadline?
+- can we subcontract without client approval?
+- what expenses can i claim without a receipt?
+
+BAD question examples (never do these):
+- What are the contractual obligations pertaining to termination notice
+  periods? (too formal)
+- Please outline the process for budget approval. (robotic/polite filler)
+- Termination Notice Period (not a question at all)
+- What does the document state about expenses? (references "the document")
+- Could you advise on the subcontracting provisions? (overly formal)
+
+**Rule 3: Answer Quality**
+Answers must be direct, specific, and complete enough to resolve the question
+without reading the source document. Use plain language. Do not say "the
+document states" or "according to the policy" - answer as a knowledgeable
+colleague would.
+
+GOOD answer example:
+"Either party can terminate with 30 days written notice. If the client
+terminates without cause before the project milestone, a cancellation fee
+of 25% of the remaining contract value applies."
+
+BAD answer example:
+"The document outlines the termination provisions as per the agreed
+contractual framework." (vague, self-referential, useless)
+
+**Rule 4: Volume Control**
+Generate only as many questions as the document genuinely supports with
+distinct, useful answers. Cover the full document - do not generate all
+questions from the first section and ignore the rest. Hard maximum is 30
+entries total. Do not pad. Do not generate filler questions. Do not ask
+the same thing in different words.
+
+**Rule 5: Confidence Scoring**
+Assign exactly one of these values to each entry:
+- "High" - the document directly and unambiguously provides the answer.
+  The fact is explicitly stated.
+- "Medium" - the document partially addresses this or the answer requires
+  combining two pieces of information. The answer is supportable but not
+  a direct quote.
+- "Low" - the answer is inferred from context or tone rather than explicit
+  statement. Flag for human review.
+
+Do not default to High. If you are unsure, it is Medium. If you are
+guessing, it is Low.
+
+**Rule 6: Category**
+Assign a consistent 2-5 word topic label. If multiple questions relate to
+the same topic, they MUST share the same category string exactly.
+  GOOD: "Contract Termination", "Expense Claims", "Data Protection"
+  BAD: "termination", "Termination clause", "Contract Termination Policy"
+       (inconsistent variants for the same topic)
+
+**Rule 7: Output Format**
+Return ONLY a valid JSON array. Your entire response must start with [ and
+end with ]. No markdown. No code fences. No backticks. No explanation.
+No preamble. No commentary. Nothing before [ and nothing after ].
+
+Each object must contain exactly these four fields:
+- "category" (string)
+- "question" (string)
+- "expectedAnswer" (string)
+- "confidence" (string - exactly "High", "Medium", or "Low")
+
+Example of correct output:
+[
+  {
+    "category": "Contract Termination",
+    "question": "what's the notice period if we want to end the contract?",
+    "expectedAnswer": "Either party can terminate with 30 days written notice. A cancellation fee of 25% of remaining contract value applies if the client terminates without cause before the project milestone.",
+    "confidence": "High"
+  }
+]
+
+---
+
+**SELF-CHECK - DO THIS BEFORE OUTPUTTING**
+
+1. Output starts with [ and ends with ] - nothing else.
+2. Every entry has exactly four fields: category, question, expectedAnswer,
+   confidence.
+3. No question asks something the document cannot answer.
+4. No duplicate or trivially similar questions.
+5. Confidence is exactly "High", "Medium", or "Low" - no other value.
+6. No answer references "the document", "this policy", or "the text above".
+7. All JSON uses double quotes. No trailing commas.
+8. Questions are distributed across the full document, not just the
+   opening section.
+
+If the document is empty, unreadable, or contains no informational
+content, return exactly: []
+
+================================================================================
+END OF GUIDE
+================================================================================
