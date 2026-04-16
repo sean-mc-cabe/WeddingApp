@@ -1,0 +1,2814 @@
+================================================================================
+FAQ AGENT FACTORY / FAQ FORGE — COMBINED ASSETS
+================================================================================
+
+This file contains the last 5 assets produced, concatenated for easy reference:
+
+  1. v2 Solution Design & Implementation Guide (extracted from .docx)
+  2. v2 Claude Project Instructions
+  3. v2 Technical Reference
+  4. v2 Dataverse Schema Quick Reference
+  5. FAQ Forge Solution Design Draft (firm template format)
+
+Each asset is separated by a clear divider. Navigate using a text editor's
+find function with the section markers below.
+
+================================================================================
+SECTION MARKERS (for quick navigation):
+  [[ASSET 1]] — v2 SOLUTION DESIGN (full document content)
+  [[ASSET 2]] — v2 PROJECT INSTRUCTIONS
+  [[ASSET 3]] — v2 TECHNICAL REFERENCE
+  [[ASSET 4]] — v2 DATAVERSE SCHEMA
+  [[ASSET 5]] — FAQ FORGE DRAFT (firm template)
+================================================================================
+
+
+
+
+################################################################################
+################################################################################
+##                                                                            ##
+##  [[ASSET 1]] v2 SOLUTION DESIGN & IMPLEMENTATION GUIDE                     ##
+##  Source: faq-agent-factory-v2.docx (text-extracted)                        ##
+##                                                                            ##
+################################################################################
+################################################################################
+
+
+*FAQ Agent Factory v2 — Solution Design **&** Implementation Guide*
+
+**FAQ Agent Factory**
+
+v2.0
+
+Solution Design & Implementation Guide
+
+A repeatable system for building, managing, and testing
+
+Copilot Studio FAQ agents with full BU self-service
+
+Platform: Copilot Studio • Power Automate • Dataverse • AI Builder • SharePoint
+
+Apps: BU Self-Service (Canvas) • Agent Management (Model-Driven)
+
+Version: 2.0 • April 2026
+
+# Contents
+
+|  | **How to update** Right-click the table of contents above in Word and select “Update Field” → “Update entire table” to populate page numbers. |
+| --- | --- |
+
+# Solution Overview
+
+## What This Solution Does
+
+The FAQ Agent Factory v2 is a complete system that lets business units self-serve the creation and maintenance of FAQ content for Copilot Studio agents, while giving agent engineers a centralised management and monitoring layer. It eliminates the manual handoff between BUs and the engineering team for routine content updates.
+
+## How It Works
+
+- **Submit: **A BU user submits a policy document via a SharePoint form with required metadata (category, approver, target agent).
+
+- **Extract: **A Power Automate flow extracts the document’s content as structured FAQ pairs using AI Builder.
+
+- **Review: **The submitter receives an Adaptive Card in Teams showing the extracted FAQs. They edit, approve, or reject directly in the card.
+
+- **Publish: **On approval, a flow generates a formatted FAQ document from a Word template and saves it to a SharePoint folder configured as the agent’s knowledge source. Copilot Studio automatically re-indexes.
+
+- **Test: **The save triggers a second flow that generates test cases, stores them in Dataverse, and runs them against the agent via Direct Line API.
+
+- **Self-serve: **BU users manage their FAQ content through a lightweight Canvas app — uploading new documents, editing individual FAQs, or removing content. Security groups control who sees what.
+
+- **Monitor: **Agent engineers use a model-driven management app to oversee all agents, request BU reviews, run test suites, and track quality over time.
+
+|  | **Key Architecture Change from v1** The knowledge source is now a SharePoint folder per agent, not uploaded file groups. Generated FAQ documents are saved directly to SharePoint. Copilot Studio reads from SharePoint via the connector and re-indexes automatically. This eliminates the manual knowledge file upload step entirely. |
+| --- | --- |
+
+## Architecture
+
+The system has three flows, two apps, and a SharePoint-centric knowledge layer:
+
+┌─────────────────────────────────────────────────────────┐
+
+│  BU USER JOURNEY                                            │
+
+│                                                             │
+
+│  SharePoint Form → Flow 1: Extract → Teams Card Review     │
+
+│       (submit)      (AI Builder)    (approve/edit/reject)   │
+
+│                                           │                  │
+
+│                                     [on approve]            │
+
+│                                           │                  │
+
+│                                           ▼                  │
+
+│  Flow 2: Generate FAQ Doc → Save to SharePoint Folder      │
+
+│  (Word template)            (agent knowledge source)        │
+
+│                                           │                  │
+
+│                                     [on file save]          │
+
+│                                           │                  │
+
+│                                           ▼                  │
+
+│  Flow 3: Generate Tests → Run Against Agent → Store Results│
+
+│  (AI Builder)          (Direct Line API)   (Dataverse)      │
+
+└─────────────────────────────────────────────────────────┘
+
+┌──────────────────────────┐  ┌────────────────────────────┐
+
+│  BU SELF-SERVICE APP       │  │  AGENT MANAGEMENT APP       │
+
+│  (Canvas App)              │  │  (Model-Driven App)          │
+
+│                            │  │                              │
+
+│  - Upload new docs         │  │  - All agents overview        │
+
+│  - Edit/delete FAQs        │  │  - Request BU reviews         │
+
+│  - Remove documents        │  │  - Run/schedule test suites   │
+
+│  - Scoped by security      │  │  - View results & trends      │
+
+│    group                   │  │  - Content lifecycle mgmt     │
+
+└──────────────────────────┘  └────────────────────────────┘
+
+## Component Summary
+
+| **Component** | **Technology** | **Purpose** |
+| --- | --- | --- |
+| SharePoint Submission | SharePoint list + custom form | BU submits policy docs with metadata |
+| Flow 1: Extract & Review | Power Automate + AI Builder + Teams | Extract FAQs, send for approval |
+| Flow 2: Publish | Power Automate + Word template | Generate FAQ doc, save to knowledge folder |
+| Flow 3: Test | Power Automate + AI Builder + Direct Line | Generate tests, run, store results |
+| Knowledge Source | SharePoint folder per agent | Copilot Studio reads FAQs from here |
+| Agent | Copilot Studio + SharePoint connector | FAQ agent deployed to Teams |
+| BU Self-Service App | Canvas App (Power Apps) | BU users manage their own FAQ content |
+| Management App | Model-Driven App (Power Apps) | Engineers oversee all agents and quality |
+| Data Store | Dataverse (5 tables) | FAQs, tests, agents, runs, documents |
+
+# Data Model
+
+Five Dataverse tables. The addition of a Source Documents table tracks the original uploaded files and links them to their extracted FAQs.
+
+## Table 1: Agents (cr_agent)
+
+| **Column** | **Type** | **Description** |
+| --- | --- | --- |
+| AgentName | Text (primary) | Display name of the agent |
+| Description | Multiline text | What the agent covers |
+| OwningBU | Text | Business unit name |
+| BUSecurityGroup | Text | Entra security group ID for access control |
+| BotId | Text | Copilot Studio bot ID |
+| DirectLineSecret | Text | For test runner API calls |
+| KnowledgeFolderURL | URL | SharePoint folder configured as knowledge source |
+| Status | Choice | Active, Draft, Retired |
+| LastPublished | Date/Time | When last FAQ doc was saved to knowledge folder |
+| TestPassRate | Decimal | Current pass rate (0–1) |
+| TotalFAQs | Whole number | Count of active FAQs |
+| AgentInstructions | Multiline text | The agent’s system instructions (for reference) |
+
+## Table 2: Source Documents (cr_sourcedocument)
+
+Tracks every policy document submitted by BU users. Links to the FAQs extracted from it.
+
+| **Column** | **Type** | **Description** |
+| --- | --- | --- |
+| DocumentName | Text (primary) | Name of the uploaded file |
+| SharePointURL | URL | Link to the file in SharePoint |
+| Agent | Lookup → Agents | Target agent |
+| Category | Choice | HR, IT, Finance, Legal Ops, Facilities, Other |
+| SubmittedBy | Text | Email of the submitter |
+| SubmittedDate | Date/Time | When the document was submitted |
+| Status | Choice | Processing, Extracted, Approved, Error, Archived |
+| FAQDocURL | URL | Link to the generated FAQ document in the knowledge folder |
+| FAQCount | Whole number | Number of FAQs extracted |
+
+## Table 3: FAQ Items (cr_faqitem)
+
+| **Column** | **Type** | **Description** |
+| --- | --- | --- |
+| Title | Text (primary, 500 chars) | The FAQ question |
+| Answer | Multiline text | The approved answer |
+| SourceDocument | Lookup → Source Documents | Which document this FAQ came from |
+| Agent | Lookup → Agents | Which agent this FAQ belongs to |
+| Category | Choice | HR, IT, Finance, Legal Ops, Facilities, Other |
+| Status | Choice | Pending Review, Approved, Rejected, Needs Update, Archived |
+| ApprovedBy | Text | Approver’s email |
+| ApprovedDate | Date | Last approval date |
+| NextReviewDate | Date | Auto: ApprovedDate + 90 days |
+| Active | Yes/No | Controls inclusion in generated FAQ doc |
+| SortOrder | Whole number | Order within generated document |
+| SourceSection | Text | Section reference from original document |
+
+## Table 4: Test Cases (cr_testcase)
+
+| **Column** | **Type** | **Description** |
+| --- | --- | --- |
+| TestQuestion | Text (primary, 500 chars) | Paraphrased test question |
+| ExpectedAnswer | Multiline text | Expected answer (from linked FAQ) |
+| LinkedFAQ | Lookup → FAQ Items | The FAQ this test validates |
+| Agent | Lookup → Agents | Agent to test against |
+| LastResult | Choice | Pass, Fail, Not Run |
+| LastRunDate | Date/Time | When last executed |
+| ActualResponse | Multiline text | Agent’s actual response |
+| SimilarityScore | Decimal | AI-judged similarity (0–1) |
+| VariationType | Text | casual, scenario, partial, negative, followup |
+
+## Table 5: Test Runs (cr_testrun)
+
+| **Column** | **Type** | **Description** |
+| --- | --- | --- |
+| RunName | Text (primary) | Auto: AgentName + DateTime |
+| Agent | Lookup → Agents | Which agent was tested |
+| RunDate | Date/Time | When the run started |
+| TotalTests | Whole number | Test cases executed |
+| Passed | Whole number | Pass count |
+| Failed | Whole number | Fail count |
+| PassRate | Decimal | Passed / TotalTests |
+| Trigger | Choice | Manual, Post-Publish, Scheduled |
+
+## Relationships
+
+Agents (1) ──→ (Many) Source Documents
+
+Agents (1) ──→ (Many) FAQ Items
+
+Agents (1) ──→ (Many) Test Cases
+
+Agents (1) ──→ (Many) Test Runs
+
+Source Documents (1) ──→ (Many) FAQ Items
+
+FAQ Items (1) ──→ (Many) Test Cases
+
+## SharePoint Structure
+
+One SharePoint site hosts all agent-related content:
+
+/sites/FAQAgentFactory/
+
+  ├── Submissions/              (Document library: BU uploads go here)
+
+  │   ├── [columns: Category, Approver, TargetAgent, Status]
+
+  │
+
+  ├── Knowledge/                (Document library: generated FAQ docs)
+
+  │   ├── HR-Policy-Agent/      (Folder → configured as knowledge source)
+
+  │   ├── IT-Policy-Agent/      (Folder → configured as knowledge source)
+
+  │   ├── Finance-Agent/        (Folder → configured as knowledge source)
+
+  │
+
+  ├── Templates/                (Word template for FAQ doc generation)
+
+      ├── FAQ-Template.docx
+
+|  | **Knowledge Source Configuration** Each subfolder under /Knowledge/ is configured as a separate SharePoint knowledge source in the corresponding Copilot Studio agent. When a new FAQ document is saved or updated in the folder, Copilot Studio’s SharePoint connector detects the change and re-indexes. There is typically a 5–30 minute delay before new content is available to the agent. |
+| --- | --- |
+
+# Implementation Guide
+
+## Phase 1: Foundation
+
+### Step 1.1: Create the Solution
+
+- Go to make.powerapps.com, select your environment.
+
+- Solutions → New solution. Name: “FAQ Agent Factory”.
+
+- Set your publisher prefix (e.g. cr). All components will use this prefix.
+
+### Step 1.2: Create All Five Dataverse Tables
+
+Create each table inside the solution using the schema in Section 2. Build in this order to handle lookups correctly: Agents first, then Source Documents, then FAQ Items, then Test Cases, then Test Runs.
+
+|  | **Enable Dataverse Search** Go to Power Platform Admin Centre → Environment → Settings → Features → Dataverse search = On. Required for knowledge source functionality. |
+| --- | --- |
+
+### Step 1.3: Create the SharePoint Site and Libraries
+
+- Create a SharePoint site: “FAQ Agent Factory”.
+
+- **Submissions library: **Add columns: Category (choice), Approver (person), Target Agent (choice — populate with agent names), Processing Status (choice: New, Processing, Extracted, Approved, Error).
+
+- **Knowledge library: **Create one subfolder per agent (e.g. HR-Policy-Agent, IT-Policy-Agent).
+
+- **Templates library: **Upload the FAQ document Word template (see Phase 3 for template design).
+
+### Step 1.4: Create Security Groups
+
+In Microsoft Entra (Azure AD), create a security group per agent/BU scope. Example: “FAQ-HR-Contributors”, “FAQ-IT-Contributors”. These groups control who can see and edit FAQ content in the BU Self-Service App. Record each group’s Object ID in the Agents table’s BUSecurityGroup column.
+
+## Phase 2: Flow 1 — Document Submission & FAQ Extraction
+
+**Trigger: **“When an item is created” — SharePoint connector, targeting the Submissions library.
+
+### Step 2.1: Get File Content and Extract Text
+
+- **Get file content: **Use SharePoint “Get file content” with the file identifier from the trigger.
+
+- **Extract text: **Use AI Builder “Extract information from documents” or “Read text from document”. For PDFs this handles OCR. For Word files, text extraction.
+
+- **Update status: **Update the SharePoint item’s Processing Status to “Processing”.
+
+### Step 2.2: Generate FAQs with AI Builder
+
+- **AI Builder GPT action: **Use “Create text with GPT using a prompt”. Use the FAQ Extraction prompt (see Section 4: AI Prompts). Map extracted text to the {{DocumentContent}} input variable.
+
+- **Clean JSON: **Compose action to strip code fences: replace(replace(output,'```json',''),'```','')
+
+- **Parse JSON: **Parse the cleaned output into typed objects.
+
+### Step 2.3: Create Dataverse Records
+
+- **Create Source Document row: **DocumentName = file name, SharePointURL = file URL, Agent = target agent from metadata, Category = from metadata, SubmittedBy = trigger user, Status = Extracted.
+
+- **Loop through FAQs: **For each FAQ in the parsed array, create a FAQ Item row: Title = question, Answer = answer, SourceDocument = the row just created, Agent = target agent, Status = Pending Review, SourceSection = source_section from JSON.
+
+### Step 2.4: Send Adaptive Card for Review
+
+Use “Post adaptive card and wait for a response” (Teams connector). Send to the submitter (from trigger metadata).
+
+The card design depends on FAQ count. For 15 or fewer FAQs, display them all in the card with individual approve/edit fields. For more than 15, show a summary with the first 5 FAQs and a link to the BU Self-Service App for full review.
+
+**Card structure (summary version):**
+
+- Document name, category, FAQ count
+
+- Sample FAQs (first 5) showing question and answer
+
+- Remaining count indicator
+
+- Three action buttons: “Approve All”, “Review in App”, “Reject All”
+
+**Card structure (full review version, ≤15 FAQs):**
+
+- Each FAQ shown with the question as a header
+
+- Answer in an editable Input.Text field (allows inline edits)
+
+- Toggle per FAQ: Approve / Reject
+
+- Submit button that sends all decisions back
+
+|  | **Adaptive Card Size Limit** Teams enforces a 28KB limit on Adaptive Card payloads. With long FAQ answers, you can hit this with 8–10 FAQs. Test your card payload size and switch to the summary version if needed. The full review experience lives in the BU Self-Service App. |
+| --- | --- |
+
+### Step 2.5: Process the Response
+
+Based on the card response action:
+
+- **Approve All: **Update all FAQ Items for this document: Status = Approved, ApprovedBy = responder, ApprovedDate = utcNow(), NextReviewDate = addDays(utcNow(), 90), Active = Yes. Update Source Document Status = Approved. Then trigger Flow 2 (call as child flow or use a Dataverse trigger).
+
+- **Review in App: **Leave FAQ status as Pending Review. Send a follow-up message with the app deep link filtered to this document’s FAQs.
+
+- **Reject All: **Update all FAQ Items: Status = Rejected. Update Source Document Status = Error. Notify submitter.
+
+- **Individual (full review card): **Parse the response data to get per-FAQ decisions. Update each FAQ Item accordingly. If any answers were edited in the card, update the Answer field. Then trigger Flow 2 for any approved FAQs.
+
+## Phase 3: Flow 2 — FAQ Document Generation & Publish
+
+**Trigger: **Called as a child flow from Flow 1 (recommended), or triggered by Source Document status changing to “Approved”.
+
+### Step 3.1: Query Approved FAQs
+
+- **List rows: **Query FAQ Items where SourceDocument = this document AND Status = Approved AND Active = Yes. Sort by Category then SortOrder.
+
+### Step 3.2: Generate the FAQ Document
+
+Two approaches — choose based on your preference:
+
+**Option A: Word template (recommended for branded output):**
+
+- Create a Word template with content controls in the Templates library.
+
+- Use the Word Online connector’s “Populate a Microsoft Word template” action.
+
+- The template should have a repeating section content control for FAQs.
+
+- Map each FAQ’s question, answer, and source reference to the template fields.
+
+**Option B: HTML to PDF:**
+
+- Build an HTML string in a Compose action using the FAQ data.
+
+- Use the Encodian connector or a custom HTTP action to convert HTML to PDF.
+
+- This gives you full control over formatting without needing a template.
+
+Regardless of approach, the output document should follow this structure for optimal retrieval:
+
+[Agent Name] — Frequently Asked Questions
+
+Source: [Document Name]
+
+Last updated: [date]
+
+Q: [Question text]
+
+A: [Answer text]
+
+Reference: [Source section] | [Link to original policy document]
+
+───
+
+Q: [Next question]
+
+A: [Next answer]
+
+Reference: [Source section] | [Link]
+
+|  | **One FAQ Doc Per Source Document** Each source policy document generates its own FAQ document in the knowledge folder. This means the agent may have multiple FAQ documents (one per policy). This is intentional — it keeps content modular and makes it easy to update or remove a single policy’s FAQs without regenerating everything. |
+| --- | --- |
+
+### Step 3.3: Save to Knowledge Folder
+
+- **Get the target folder: **Look up the agent’s KnowledgeFolderURL from the Agents table.
+
+- **Create file: **Use SharePoint “Create file” action to save the generated document to the agent’s knowledge folder. File name: [Category]-[DocumentName]-FAQs.docx (or .pdf).
+
+- **Update records: **Update the Source Document’s FAQDocURL with the SharePoint link. Update the Agent’s LastPublished timestamp.
+
+## Phase 4: Flow 3 — Test Generation & Execution
+
+**Trigger: **“When a file is created or modified” in the Knowledge library (with folder path filter for the specific agent’s subfolder), OR called as a child flow from Flow 2.
+
+### Step 4.1: Generate Test Cases
+
+- **Get the FAQ content: **If triggered by file creation, extract the text from the new FAQ document. If called as child flow, receive the FAQ JSON from Flow 2.
+
+- **AI Builder GPT action: **Use the Test Case Generation prompt (see Section 4). Pass the FAQ content/JSON.
+
+- **Parse and store: **Parse the test case JSON. For each test case, create or update a Test Case row in Dataverse: TestQuestion, ExpectedAnswer, LinkedFAQ (match by faq_id), Agent, LastResult = Not Run.
+
+|  | **Test Case Updates** If this FAQ document has been regenerated (updated FAQs), the flow should update existing test cases rather than creating duplicates. Match on LinkedFAQ + VariationType to find existing test cases to update. |
+| --- | --- |
+
+### Step 4.2: Run the Test Suite
+
+- **Create Test Run record: **RunName = AgentName + utcNow(), TotalTests = count, Trigger = Post-Publish.
+
+- **Get Direct Line secret: **From the Agent record in Dataverse.
+
+- **For each test case:**
+
+- Start a new Direct Line conversation (POST /v3/directline/conversations).
+
+- Send the test question (POST to /conversations/{id}/activities).
+
+- Poll for response (GET activities with watermark, retry up to 10 times with 3-second delay).
+
+- Evaluate response using AI Builder evaluation prompt (see Section 4).
+
+- Update Test Case: ActualResponse, SimilarityScore, LastResult, LastRunDate.
+
+- **Finalise: **Update Test Run with Passed/Failed/PassRate. Update Agent’s TestPassRate. Send notification card to the agent engineer in Teams.
+
+|  | **Performance** 50 tests takes roughly 15–25 minutes via Direct Line. The flow runs asynchronously. Do not wait for it. The notification card is your signal to review results. |
+| --- | --- |
+
+## Phase 5: Copilot Studio Agent Setup
+
+### Step 5.1: Create the Agent
+
+- Go to copilotstudio.microsoft.com, select your environment.
+
+- Create → New agent. Name it descriptively (e.g. “HR Policy FAQ Assistant”).
+
+- Write a detailed description (used by generative orchestration for routing).
+
+- Enable Generative orchestration (default).
+
+### Step 5.2: Add SharePoint Knowledge Source
+
+- On the Knowledge page, click Add knowledge.
+
+- Select SharePoint.
+
+- Browse to the agent’s subfolder under /Knowledge/ (e.g. /Knowledge/HR-Policy-Agent/).
+
+- Give the knowledge source a descriptive name and detailed description.
+
+- Wait for indexing to complete (status: Ready).
+
+### Step 5.3: Configure Agent Settings
+
+- **Turn off ungrounded responses: **Settings → Generative AI → toggle OFF “Allow the AI to use its own general knowledge.”
+
+- **Set agent instructions: **Paste the agent instructions template (see Section 5).
+
+- **Authentication: **Set to “Authenticate with Microsoft” for internal Teams agents.
+
+### Step 5.4: Deploy to Teams
+
+- Channels → Microsoft Teams → Turn on.
+
+- Scope availability via Teams admin centre to the appropriate user groups.
+
+### Step 5.5: Enable Direct Line (for Test Runner)
+
+- Channels → Direct Line → Enable.
+
+- Copy the secret and store it in the Agents table (DirectLineSecret column).
+
+- Record the Bot ID from Settings → Agent details.
+
+## Phase 6: BU Self-Service App (Canvas App)
+
+A lightweight Canvas App that gives BU users control over their FAQ content without needing access to Copilot Studio or Dataverse directly.
+
+### App Design
+
+**Screen 1 — Home / Document List:**
+
+- Shows all Source Documents where the current user’s security group matches the Agent’s BUSecurityGroup.
+
+- Each document card shows: name, category, status, FAQ count, last updated.
+
+- Buttons: “Upload New Document”, “View FAQs”, “Remove Document”.
+
+**Screen 2 — Upload New Document:**
+
+- Form with: file upload (attachment control), Category (dropdown), Target Agent (dropdown — filtered to agents the user has access to).
+
+- On submit: creates a new item in the SharePoint Submissions library with the metadata, which triggers Flow 1.
+
+- Confirmation message: “Document submitted. You’ll receive a Teams notification when FAQs are ready for review.”
+
+**Screen 3 — FAQ List (for a selected document):**
+
+- Gallery showing all FAQ Items linked to the selected Source Document.
+
+- Each FAQ shows: question, answer (truncated), status, last approved date.
+
+- Tap to edit: opens an edit form for that FAQ (question, answer, active toggle).
+
+- Delete button per FAQ (sets Status = Archived, Active = No).
+
+- Bulk action: “Regenerate FAQ Document” button that triggers Flow 2 to rebuild the knowledge file from current active FAQs.
+
+### Security Scoping
+
+The app uses the current user’s Entra group membership to filter visible content:
+
+- On app load, call the Microsoft Graph connector (or Office 365 Groups connector) to get the user’s group memberships.
+
+- Query the Agents table to find agents where BUSecurityGroup is in the user’s group list.
+
+- Filter all galleries (documents, FAQs) to only show content linked to those agents.
+
+- This means a user in the “FAQ-HR-Contributors” group sees only HR agent content, while a user in both HR and IT groups sees both.
+
+|  | **Single App, Whole Organisation** One Canvas App is shared with the entire organisation. Security scoping happens at runtime via group membership. Users who aren’t in any FAQ security group see an empty home screen with a message to contact their admin. |
+| --- | --- |
+
+## Phase 7: Agent Management App (Model-Driven)
+
+For agent engineers only. Full visibility and control over all agents, content, and testing.
+
+### Sitemap Structure
+
+- **Dashboard: **Overview of all agents with pass rates, FAQ counts, agents needing attention.
+
+- **Agents: **Full CRUD on agent records. Sub-grids for related documents, FAQs, test runs.
+
+- **Source Documents: **All uploaded documents across all agents. Filter by status, category, agent.
+
+- **FAQ Items: **All FAQs across all agents. Views: Pending Review, Approved, Review Due, Failed Tests.
+
+- **Test Cases: **All test cases. Key view: Failed Tests (showing expected vs actual side by side).
+
+- **Test Runs: **History of all test executions. Trend analysis via charts.
+
+### Key Features
+
+**Request BU Review: **A custom button on the Agent form that triggers a Power Automate flow. The flow queries FAQs due for review (NextReviewDate <= today) and sends an Adaptive Card to the BU security group in Teams. The card summarises which FAQs need re-validation and links to the BU Self-Service App.
+
+**Run Test Suite: **A custom button on the Agent form that triggers the test runner flow (Flow 3’s test execution portion) for the selected agent. Results populate in the Test Runs sub-grid when complete.
+
+**Schedule Tests: **A scheduled Power Automate flow that runs weekly, iterating through all Active agents and executing their test suites. Results feed into the dashboard trends.
+
+### Dashboard Components
+
+- Card: Total Active Agents
+
+- Card: Total Approved FAQs
+
+- Card: Average Pass Rate (across all agents)
+
+- Card: Agents Below 80% Pass Rate (attention needed)
+
+- Chart: Pass Rate Trend (line chart, Test Runs over time, per agent)
+
+- Chart: FAQs by Status (pie chart)
+
+- Chart: FAQs by Category (bar chart)
+
+- View: Agents Needing Attention (pass rate < 80% or review overdue)
+
+# AI Prompts
+
+All prompts used in the solution. Each is designed for AI Builder’s “Create text with GPT using a prompt” action.
+
+## Prompt 1: FAQ Extraction
+
+**Used in: **Flow 1, Step 2.2
+
+**Input variable: **{{DocumentContent}} — the extracted text of the policy document
+
+You are a senior knowledge management specialist at a large
+
+international law firm. Your task is to convert the ENTIRE content
+
+of the following policy document into a comprehensive set of
+
+Frequently Asked Questions (FAQs).
+
+CRITICAL REQUIREMENTS:
+
+1. COMPLETE COVERAGE: Every piece of substantive information in
+
+   the document must be captured in at least one FAQ. Do not skip
+
+   sections, paragraphs, tables, or details. If a section
+
+   contains multiple distinct points, create separate FAQs for
+
+   each one.
+
+2. QUESTION STYLE: Write questions the way a real employee
+
+   would ask them in a chat interface. Use natural, conversational
+
+   language. Avoid bureaucratic or policy-reference phrasing.
+
+   GOOD: "How many days of annual leave do I get?"
+
+   BAD: "What is the annual leave entitlement per section 3.2?"
+
+   GOOD: "What do I do if I need to work from home?"
+
+   BAD: "What is the procedure for requesting remote work
+
+   arrangements as outlined in the flexible working policy?"
+
+3. ANSWER STYLE:
+
+   - Lead with the direct answer, then add context if needed.
+
+   - Include specific numbers, dates, thresholds, conditions.
+
+   - If different rules apply to different groups (by role,
+
+     tenure, region, grade), include ALL variations.
+
+   - Each answer must be self-contained. A reader should not
+
+     need to read other FAQs to understand this one.
+
+   - Do NOT invent information not present in the document.
+
+   - If the document is ambiguous on a point, note the
+
+     ambiguity in the answer.
+
+4. PROCESSES: For any process described (how to apply, request,
+
+   report, escalate), create a FAQ with numbered step-by-step
+
+   instructions in the answer.
+
+5. EDGE CASES: For conditions, exceptions, and special
+
+   circumstances, create dedicated FAQs.
+
+   Examples: "What happens if I exceed my expense limit?"
+
+   "Can I carry over unused leave to next year?"
+
+6. TABLES AND SCHEDULES: If the document contains tables
+
+   (e.g. pay grades, entitlement schedules, fee structures),
+
+   convert each meaningful row or grouping into one or more
+
+   FAQs. Do not try to reproduce tables in FAQ format.
+
+7. OUTPUT FORMAT: Return ONLY a valid JSON object. No markdown
+
+   formatting, no code fences, no explanatory text before or
+
+   after the JSON.
+
+{
+
+  "source_document": "[document title or filename]",
+
+  "extraction_date": "[today's date YYYY-MM-DD]",
+
+  "category": "[HR|IT|Finance|Legal Ops|Facilities|Other]",
+
+  "total_faqs": [number],
+
+  "faqs": [
+
+    {
+
+      "id": 1,
+
+      "question": "...",
+
+      "answer": "...",
+
+      "source_section": "[heading or page ref from document]"
+
+    }
+
+  ]
+
+}
+
+DOCUMENT CONTENT:
+
+{{DocumentContent}}
+
+## Prompt 2: Test Case Generation
+
+**Used in: **Flow 3, Step 4.1
+
+**Input variable: **{{FAQJson}} — the FAQ extraction JSON output
+
+You are a QA specialist testing an AI FAQ agent at a large
+
+international law firm. You have a set of FAQs the agent is
+
+trained on. Generate TEST QUESTIONS phrased DIFFERENTLY from
+
+the FAQ questions but answerable from the FAQ content.
+
+REQUIREMENTS:
+
+1. Generate 2–4 test questions per FAQ, up to a MAXIMUM of 100
+
+   test questions total. If the FAQ set is large, prioritise:
+
+   - Processes (how to do something)
+
+   - Entitlements and thresholds (numbers, days, amounts)
+
+   - Conditions, exceptions, and edge cases
+
+   - Frequently confused or similar topics
+
+2. VARIATION STRATEGIES — use a mix for each FAQ:
+
+   - casual: "Hey, how do I sort out my expenses?"
+
+   - scenario: "I need to book a flight for a client meeting
+
+     next week, what's the process?"
+
+   - partial: "What's the limit for expenses?"
+
+   - negative: "Am I not allowed to book my own travel?"
+
+   - followup: "And what if I go over the limit?"
+
+3. Each test question MUST be paired with the EXPECTED ANSWER
+
+   copied exactly from the corresponding FAQ.
+
+4. OUTPUT: Return ONLY valid JSON. No markdown, no code fences.
+
+{
+
+  "test_cases": [
+
+    {
+
+      "id": 1,
+
+      "faq_id": 1,
+
+      "test_question": "...",
+
+      "expected_answer": "[exact FAQ answer]",
+
+      "variation_type": "casual|scenario|partial|negative|followup"
+
+    }
+
+  ],
+
+  "total_test_cases": [number],
+
+  "coverage_summary": {
+
+    "faqs_covered": [number],
+
+    "faqs_skipped": [number],
+
+    "skip_reason": "[explanation if any skipped]"
+
+  }
+
+}
+
+FAQ SET:
+
+{{FAQJson}}
+
+## Prompt 3: Test Response Evaluation
+
+**Used in: **Flow 3, Step 4.2 (inside the test loop)
+
+**Input variables: **{{ExpectedAnswer}}, {{ActualAnswer}}
+
+Compare the following two answers and assess whether the
+
+ACTUAL answer provides the same substantive information as
+
+the EXPECTED answer.
+
+SCORING RULES:
+
+- Focus on FACTUAL CONTENT, not exact wording.
+
+- If the actual answer conveys the same key facts, numbers,
+
+  dates, and instructions, score high even if phrased
+
+  differently.
+
+- Deduct for: missing key information, incorrect facts,
+
+  contradictions, or "I don't know" responses when the
+
+  expected answer has content.
+
+- A generic or vague answer scores lower than a specific one.
+
+Return ONLY a JSON object:
+
+{
+
+  "score": [0.0 to 1.0],
+
+  "match": [true if score >= 0.7, false otherwise],
+
+  "reason": "[one sentence explaining the score]"
+
+}
+
+EXPECTED ANSWER:
+
+{{ExpectedAnswer}}
+
+ACTUAL ANSWER:
+
+{{ActualAnswer}}
+
+## Prompt 4: FAQ Regeneration from Edited Content
+
+**Used in: **BU Self-Service App — when a user edits FAQs and triggers regeneration. This prompt is optional; it’s only needed if you want to re-optimise answers after manual edits.
+
+**Input variable: **{{EditedFAQs}} — JSON array of the current FAQ items after editing
+
+You are reviewing a set of FAQ entries that have been manually
+
+edited by a business user. Your task is to quality-check each
+
+entry and suggest improvements WITHOUT changing the factual
+
+content.
+
+For each FAQ, check:
+
+1. Is the question written in natural, conversational language?
+
+2. Is the answer self-contained and specific?
+
+3. Are there any obvious gaps or ambiguities?
+
+Return ONLY valid JSON:
+
+{
+
+  "reviewed_faqs": [
+
+    {
+
+      "id": [original id],
+
+      "question": "[improved or unchanged]",
+
+      "answer": "[improved or unchanged]",
+
+      "changes_made": "[none|minor rewording|clarity improvement]"
+
+    }
+
+  ]
+
+}
+
+EDITED FAQs:
+
+{{EditedFAQs}}
+
+# Agent Instructions Template
+
+Use this template for every FAQ agent. Replace the bracketed placeholders with agent-specific values.
+
+You are the [Business Unit] FAQ Assistant for [Firm Name].
+
+PURPOSE:
+
+You answer employee questions about [Business Unit] policies
+
+and procedures using ONLY the approved FAQ content in your
+
+knowledge sources. You do not use general knowledge.
+
+RULES:
+
+1. Answer ONLY from the FAQ documents in your knowledge.
+
+   If the answer is not in your knowledge, say:
+
+   "I don't have information on that topic. Please contact
+
+   [BU contact team] at [email] for help."
+
+2. When you find a matching FAQ, provide the answer clearly
+
+   and concisely. If the knowledge source includes a
+
+   reference link, include it in your response as:
+
+   "For full details, see: [document name]."
+
+3. If multiple FAQs are relevant to the user's question,
+
+   combine the information into a single coherent response.
+
+   Do not list FAQ titles or IDs.
+
+4. Use plain, professional English. Be concise. Do not
+
+   repeat the user's question back to them.
+
+5. If the user asks about something that sounds related to
+
+   your knowledge but you can't find a specific FAQ match,
+
+   do NOT guess or provide general advice. Redirect to
+
+   the [BU contact team].
+
+6. NEVER provide legal advice. If the user asks a question
+
+   that requires legal interpretation (e.g. "is this
+
+   discrimination?", "can they do this?"), respond:
+
+   "That question requires legal advice which I'm not able
+
+   to provide. Please contact [legal team/HR] at [email]."
+
+7. Be helpful and empathetic in tone, but factual in
+
+   content. If a user seems frustrated or upset, acknowledge
+
+   their concern before providing the factual answer.
+
+8. If asked who you are: "I'm the [Business Unit] FAQ
+
+   Assistant. I can help with questions about [topic areas].
+
+   For anything outside these areas, I'll direct you to
+
+   the right team."
+
+**Example agent instructions (filled in for HR):**
+
+You are the HR Policy FAQ Assistant for Clifford Chance.
+
+PURPOSE:
+
+You answer employee questions about HR policies and
+
+procedures using ONLY the approved FAQ content in your
+
+knowledge sources. You do not use general knowledge.
+
+RULES:
+
+1. Answer ONLY from the FAQ documents in your knowledge.
+
+   If the answer is not in your knowledge, say:
+
+   "I don't have information on that topic. Please contact
+
+   the HR Helpdesk at hr.helpdesk@example.com for help."
+
+[...remainder of template with placeholders filled in...]
+
+|  | **Store Instructions in Dataverse** Copy the agent’s instructions into the AgentInstructions field on the Agents table. This gives you a versioned, searchable record of each agent’s behaviour configuration — useful when debugging or onboarding new agents. |
+| --- | --- |
+
+# Security Model
+
+## Access Control Summary
+
+| **User Type** | **Access To** | **Controlled By** |
+| --- | --- | --- |
+| BU User (FAQ contributor) | BU Self-Service App — filtered to their BU’s agents only | Entra security group membership |
+| BU Approver | Teams Adaptive Cards for review + BU App | SharePoint Approver column + security group |
+| Agent Engineer | Agent Management App — all agents | Dataverse security role (e.g. System Customiser) |
+| End User (agent consumer) | The Teams agent only | Teams app scoping in admin centre |
+| Admin | Power Platform admin + SharePoint admin | Existing admin roles |
+
+## Dataverse Security
+
+Create a custom Dataverse security role for BU Self-Service App users. Grant: Read on Agents, Read/Write/Append on FAQ Items (filtered by BU group), Read on Source Documents, No access to Test Cases or Test Runs.
+
+Agent engineers get the System Customiser role or a custom role with full access to all five tables.
+
+# Operational Guidance
+
+## Onboarding a New Agent
+
+- Create a row in the Agents table with name, description, owning BU, and security group.
+
+- Create the agent’s subfolder in /Knowledge/ on SharePoint.
+
+- Create and configure the Copilot Studio agent (Phase 5 steps).
+
+- Record Bot ID and Direct Line secret in Dataverse.
+
+- Have the BU upload their first policy document via the self-service app.
+
+- FAQs flow through the pipeline: extract → review → publish → test.
+
+- Review test results. Adjust agent instructions or FAQ content as needed.
+
+- Deploy to Teams for end users.
+
+## Ongoing Maintenance
+
+- **Weekly: **Scheduled test suite runs automatically. Review pass rates in the management app.
+
+- **Monthly: **Review “Agents Needing Attention” dashboard view. Request BU reviews where overdue.
+
+- **As needed: **When BU updates a policy, they submit the new document via the self-service app. The pipeline regenerates FAQs and tests automatically.
+
+## Removing a Policy’s Content
+
+- BU user deletes the document in the self-service app.
+
+- App sets all linked FAQs to Archived, Active = No.
+
+- Triggers regeneration: the FAQ document in the knowledge folder is either deleted or regenerated without the removed FAQs.
+
+- Copilot Studio re-indexes the knowledge folder.
+
+- Related test cases are marked inactive.
+
+## Known Limitations
+
+| **Limitation** | **Impact** | **Workaround** |
+| --- | --- | --- |
+| SharePoint re-indexing delay (5–30 mins) | New FAQ docs aren’t available to the agent immediately | Inform BU users. Run tests after a 30-min delay. |
+| AI Builder token limits | Very large documents (50+ pages) may truncate | Split documents by section before extraction. |
+| Adaptive Card 28KB limit | Large FAQ sets can’t fit in one card | Show summary card + link to self-service app. |
+| Direct Line latency | Test suite is slow (15–25 mins for 50 tests) | Run asynchronously. Notification on completion. |
+| SharePoint connector auth | Requires “Authenticate with Microsoft” | Standard for internal Teams agents. Not an issue. |
+
+Page
+
+
+################################################################################
+################################################################################
+##                                                                            ##
+##  [[ASSET 2]] v2 CLAUDE PROJECT INSTRUCTIONS                                ##
+##  Source: v2-project-instructions.md                                        ##
+##                                                                            ##
+################################################################################
+################################################################################
+
+
+# FAQ Agent Factory v2 — Claude Project Instructions
+
+## Your Role
+
+You are a senior Microsoft Power Platform and Copilot Studio technical architect assisting Sean with the build and ongoing management of the **FAQ Agent Factory v2** — a system for creating, managing, and testing Copilot Studio FAQ agents with full BU self-service at a large global law firm.
+
+You have the complete solution design document and technical references in your knowledge sources. Treat them as the source of truth for architecture, data model, flow logic, and build sequence.
+
+## Context
+
+- **Environment:** Large global law firm, internal-facing agents only
+- **Deployment channel:** Microsoft Teams
+- **Platform:** Copilot Studio, Power Automate (Premium), Dataverse, AI Builder, SharePoint, Power Apps
+- **Orchestration:** Generative orchestration in Copilot Studio
+- **Knowledge source:** SharePoint folders per agent (NOT file groups, NOT Dataverse tables as knowledge)
+- **Licensing:** All premium licences available
+
+## Architecture Summary (v2)
+
+Three flows, two apps, SharePoint-centric knowledge:
+
+### Flows
+1. **Flow 1: Extract & Review** — SharePoint submission triggers AI Builder extraction → Adaptive Card in Teams for BU review/edit/approve
+2. **Flow 2: Publish** — On approval, generates FAQ document from Word template → saves to SharePoint knowledge folder → Copilot Studio auto-indexes
+3. **Flow 3: Test** — Triggered by new file in knowledge folder → generates test cases via AI Builder → runs against agent via Direct Line → stores results in Dataverse
+
+### Apps
+- **BU Self-Service App** (Canvas): Upload documents, edit/delete FAQs, remove documents. Security-group-scoped — one app, whole org, users only see their BU's content.
+- **Agent Management App** (Model-driven): All agents overview, request BU reviews, run/schedule test suites, view results and trends, content lifecycle management.
+
+### Data
+- **5 Dataverse tables:** Agents, Source Documents, FAQ Items, Test Cases, Test Runs
+- **SharePoint:** Submissions library (uploads), Knowledge library (per-agent subfolders), Templates library
+
+### Key Design Principles
+- SharePoint folders ARE the knowledge source — no manual uploads to Copilot Studio
+- One FAQ document generated per source policy document (modular, easy to update/remove)
+- BU users self-serve via Canvas app — agent engineers manage via model-driven app
+- Security groups control BU access — one app for the whole organisation
+- Automated test suite validates agent quality after every publish
+
+## How to Help Sean
+
+### When asked to build a specific component:
+- Reference the solution design document for the relevant phase
+- Provide complete, copy-paste-ready code/configuration/JSON
+- Include error handling
+- Flag dependencies on other components
+- For UI configuration (Copilot Studio, Power Apps), give exact navigation paths
+
+### Code and configuration standards:
+- **Power Automate expressions:** Exact syntax with proper function names
+- **JSON:** Always valid, always complete — paste-ready
+- **Adaptive Cards:** Schema 1.4 (Teams-compatible), full JSON not fragments
+- **Power Fx:** Correct Copilot Studio syntax with proper variable prefixes
+- **Dataverse:** Use schema names from the data model (cr_agent, cr_sourcedocument, cr_faqitem, cr_testcase, cr_testrun) with cr prefix
+
+### Tone: Direct, technical, no filler. Lead with the answer. Flag risks proactively.
+
+## Critical Technical Constraints
+
+1. **SharePoint re-indexing takes 5–30 minutes.** New FAQ docs aren't available to the agent immediately. Build a delay into the test runner trigger or accept that the first test run after publish may fail on new content.
+
+2. **Adaptive Cards: 28KB limit in Teams.** Large FAQ sets (8–10+ with long answers) won't fit. Use the summary card + app link pattern.
+
+3. **AI Builder JSON output** often comes wrapped in markdown code fences. Always strip ` ```json ` and ` ``` ` before parsing.
+
+4. **Direct Line API requires polling.** POST message → poll GET activities until bot responds. New conversation per test question to avoid context bleed. Typical latency: 5–15 seconds per question.
+
+5. **SharePoint knowledge source in Copilot Studio** uses the SharePoint connector. Requires "Authenticate with Microsoft" auth setting. Files up to 512MB supported for PDF/DOCX/PPTX.
+
+6. **One FAQ document per source policy document** in the knowledge folder. When a BU user removes a document or edits FAQs, the corresponding knowledge file must be regenerated or deleted.
+
+7. **Canvas App security scoping** uses Entra security group membership checked at runtime via the Office 365 Groups connector or Microsoft Graph. The BUSecurityGroup field on the Agents table stores the group Object ID.
+
+8. **"Allow ungrounded responses" must be OFF** for all agents. Non-negotiable in a law firm context.
+
+9. **Word template for FAQ generation** lives in the SharePoint Templates library. Use the Word Online connector's "Populate a Microsoft Word template" action, or build HTML and convert.
+
+10. **Test evaluation threshold** of 0.7 similarity score is the default for pass/fail. Adjust per agent if needed — some policy domains require stricter matching.
+
+## What's in the Knowledge Sources
+
+- **FAQ Agent Factory v2 — Solution Design & Implementation Guide (Word):** Complete architecture, data model (5 tables), SharePoint structure, all 3 flows step by step, both app designs, all 4 AI prompts, agent instructions template, security model, and operational guidance.
+- **Technical Reference (Markdown):** Direct Line API patterns, Dataverse Copilot Components API, Adaptive Card JSON templates (FAQ review, test results, review reminder), Power Automate expression patterns, knowledge file format specification, agent configuration checklist, AI Builder prompt setup, troubleshooting guide.
+- **Dataverse Schema Quick Reference (Markdown):** All 5 tables with exact column names/types, relationships, views to create, and Dataverse filter queries used by each flow.
+
+## Session Patterns
+
+Sean works in focused build sessions. He'll typically ask to:
+- Build a specific flow end to end
+- Get Adaptive Card JSON for a specific scenario
+- Write or debug Power Automate expressions
+- Configure Copilot Studio settings
+- Design Canvas App screens or data sources
+- Create Dataverse views or business rules
+- Refine AI Builder prompts based on extraction quality
+- Troubleshoot a specific error or unexpected behaviour
+
+Always respond with complete, working output. Sean iterates on concrete artifacts, not abstractions.
+
+
+
+################################################################################
+################################################################################
+##                                                                            ##
+##  [[ASSET 3]] v2 TECHNICAL REFERENCE                                        ##
+##  Source: v2-technical-reference.md                                         ##
+##                                                                            ##
+################################################################################
+################################################################################
+
+
+# FAQ Agent Factory v2 — Technical Reference
+
+## 1. Direct Line API Reference
+
+### Start Conversation
+```
+POST https://directline.botframework.com/v3/directline/conversations
+Authorization: Bearer {DirectLineSecret}
+Content-Type: application/json
+```
+Response: `{ "conversationId": "abc123", "token": "...", "expires_in": 1800 }`
+
+### Send Message
+```
+POST https://directline.botframework.com/v3/directline/conversations/{conversationId}/activities
+Authorization: Bearer {DirectLineSecret}
+Content-Type: application/json
+
+{ "type": "message", "from": { "id": "test-runner" }, "text": "How many days of annual leave do I get?" }
+```
+
+### Poll for Response
+```
+GET https://directline.botframework.com/v3/directline/conversations/{conversationId}/activities?watermark={watermark}
+Authorization: Bearer {DirectLineSecret}
+```
+Filter activities where `from.id` != "test-runner" to get bot response. Pass `watermark` from each response to next poll.
+
+### Power Automate Implementation
+1. HTTP POST → start conversation → get conversationId
+2. HTTP POST → send test question
+3. Initialize: watermark = "", botResponse = "", attempts = 0
+4. Do Until: botResponse not empty OR attempts >= 10
+   - HTTP GET activities with watermark
+   - Apply to each: if from.id != "test-runner" AND type == "message" → set botResponse
+   - Increment attempts
+   - Delay 3 seconds
+5. botResponse = agent's answer (or empty if timeout)
+
+**Important:** Create a NEW conversation per test question to avoid context bleed.
+
+---
+
+## 2. Adaptive Card Templates
+
+### 2.1 FAQ Review — Summary Version (>15 FAQs)
+```json
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "type": "AdaptiveCard",
+  "version": "1.4",
+  "body": [
+    {
+      "type": "TextBlock",
+      "text": "📋 FAQ Extraction Complete",
+      "weight": "bolder",
+      "size": "large",
+      "wrap": true
+    },
+    {
+      "type": "FactSet",
+      "facts": [
+        { "title": "Document:", "value": "${DocumentName}" },
+        { "title": "Category:", "value": "${Category}" },
+        { "title": "FAQs Extracted:", "value": "${FAQCount}" },
+        { "title": "Test Cases:", "value": "${TestCaseCount}" }
+      ]
+    },
+    {
+      "type": "TextBlock",
+      "text": "Sample FAQs:",
+      "weight": "bolder",
+      "spacing": "medium",
+      "wrap": true
+    },
+    {
+      "type": "Container",
+      "style": "emphasis",
+      "items": [
+        { "type": "TextBlock", "text": "**Q:** ${FAQ1_Question}", "wrap": true },
+        { "type": "TextBlock", "text": "A: ${FAQ1_Answer}", "wrap": true, "spacing": "small", "isSubtle": true }
+      ]
+    },
+    {
+      "type": "Container",
+      "items": [
+        { "type": "TextBlock", "text": "**Q:** ${FAQ2_Question}", "wrap": true },
+        { "type": "TextBlock", "text": "A: ${FAQ2_Answer}", "wrap": true, "spacing": "small", "isSubtle": true }
+      ]
+    },
+    {
+      "type": "Container",
+      "style": "emphasis",
+      "items": [
+        { "type": "TextBlock", "text": "**Q:** ${FAQ3_Question}", "wrap": true },
+        { "type": "TextBlock", "text": "A: ${FAQ3_Answer}", "wrap": true, "spacing": "small", "isSubtle": true }
+      ]
+    },
+    {
+      "type": "TextBlock",
+      "text": "_... and ${RemainingCount} more_",
+      "isSubtle": true,
+      "spacing": "medium",
+      "wrap": true
+    }
+  ],
+  "actions": [
+    { "type": "Action.Submit", "title": "✅ Approve All", "style": "positive", "data": { "action": "approve_all", "documentId": "${DocumentId}" } },
+    { "type": "Action.OpenUrl", "title": "📝 Review in App", "url": "${AppDeepLink}" },
+    { "type": "Action.Submit", "title": "❌ Reject All", "style": "destructive", "data": { "action": "reject_all", "documentId": "${DocumentId}" } }
+  ]
+}
+```
+
+### 2.2 FAQ Review — Full Edit Version (≤15 FAQs)
+```json
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "type": "AdaptiveCard",
+  "version": "1.4",
+  "body": [
+    {
+      "type": "TextBlock",
+      "text": "📋 Review Extracted FAQs",
+      "weight": "bolder",
+      "size": "large",
+      "wrap": true
+    },
+    {
+      "type": "TextBlock",
+      "text": "Review each FAQ below. Edit answers if needed, then approve or reject.",
+      "wrap": true,
+      "isSubtle": true
+    },
+    {
+      "type": "TextBlock",
+      "text": "FAQ 1",
+      "weight": "bolder",
+      "spacing": "large",
+      "wrap": true
+    },
+    {
+      "type": "TextBlock",
+      "text": "**Q:** ${FAQ1_Question}",
+      "wrap": true
+    },
+    {
+      "type": "Input.Text",
+      "id": "answer_1",
+      "isMultiline": true,
+      "value": "${FAQ1_Answer}",
+      "label": "Answer:"
+    },
+    {
+      "type": "Input.ChoiceSet",
+      "id": "decision_1",
+      "value": "approve",
+      "choices": [
+        { "title": "✅ Approve", "value": "approve" },
+        { "title": "❌ Reject", "value": "reject" }
+      ],
+      "style": "expanded"
+    }
+  ],
+  "actions": [
+    {
+      "type": "Action.Submit",
+      "title": "Submit All Decisions",
+      "data": { "action": "individual_review", "documentId": "${DocumentId}" }
+    }
+  ]
+}
+```
+Note: Repeat the FAQ block (TextBlock + Input.Text + Input.ChoiceSet) for each FAQ, incrementing the IDs (answer_2, decision_2, etc.). Build dynamically in Power Automate.
+
+### 2.3 Test Results Notification
+```json
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "type": "AdaptiveCard",
+  "version": "1.4",
+  "body": [
+    {
+      "type": "TextBlock",
+      "text": "🧪 Test Results: ${AgentName}",
+      "weight": "bolder",
+      "size": "large",
+      "wrap": true
+    },
+    {
+      "type": "ColumnSet",
+      "columns": [
+        {
+          "type": "Column",
+          "width": "stretch",
+          "items": [
+            { "type": "TextBlock", "text": "${PassRate}%", "size": "extraLarge", "weight": "bolder", "color": "${PassRateColor}", "horizontalAlignment": "center" },
+            { "type": "TextBlock", "text": "Pass Rate", "horizontalAlignment": "center", "isSubtle": true }
+          ]
+        },
+        {
+          "type": "Column",
+          "width": "stretch",
+          "items": [
+            { "type": "FactSet", "facts": [
+              { "title": "Total:", "value": "${TotalTests}" },
+              { "title": "Passed:", "value": "${Passed}" },
+              { "title": "Failed:", "value": "${Failed}" }
+            ]}
+          ]
+        }
+      ]
+    },
+    {
+      "type": "TextBlock",
+      "text": "Top Failures:",
+      "weight": "bolder",
+      "spacing": "medium",
+      "wrap": true
+    },
+    {
+      "type": "Container",
+      "style": "attention",
+      "items": [
+        { "type": "TextBlock", "text": "Q: ${Fail1_Question}", "wrap": true },
+        { "type": "TextBlock", "text": "Expected: ${Fail1_Expected}", "wrap": true, "isSubtle": true, "size": "small" },
+        { "type": "TextBlock", "text": "Got: ${Fail1_Actual}", "wrap": true, "isSubtle": true, "size": "small" }
+      ]
+    }
+  ],
+  "actions": [
+    { "type": "Action.OpenUrl", "title": "View Full Results", "url": "${ManagementAppURL}" }
+  ]
+}
+```
+
+### 2.4 Review Reminder
+```json
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "type": "AdaptiveCard",
+  "version": "1.4",
+  "body": [
+    { "type": "TextBlock", "text": "📅 FAQ Review Due", "weight": "bolder", "size": "large", "wrap": true },
+    { "type": "TextBlock", "text": "${FAQCount} FAQ(s) from **${AgentName}** are due for review.", "wrap": true },
+    {
+      "type": "Container",
+      "style": "emphasis",
+      "items": [
+        { "type": "TextBlock", "text": "• ${FAQ1_Title}", "wrap": true },
+        { "type": "TextBlock", "text": "• ${FAQ2_Title}", "wrap": true },
+        { "type": "TextBlock", "text": "• ${FAQ3_Title}", "wrap": true },
+        { "type": "TextBlock", "text": "_... and ${MoreCount} more_", "isSubtle": true, "wrap": true }
+      ]
+    }
+  ],
+  "actions": [
+    { "type": "Action.Submit", "title": "✅ All Still Accurate", "style": "positive", "data": { "action": "reapprove_all", "faqIds": "${FAQIdArray}" } },
+    { "type": "Action.OpenUrl", "title": "📝 Review & Update", "url": "${AppDeepLink}" }
+  ]
+}
+```
+
+---
+
+## 3. Power Automate Expression Patterns
+
+### Strip AI Builder code fences
+```
+replace(replace(outputs('Create_text_with_GPT'),'```json',''),'```','')
+```
+
+### Set next review date (90 days)
+```
+addDays(utcNow(), 90)
+```
+
+### Format date for Adaptive Card
+```
+formatDateTime(utcNow(), 'dd MMM yyyy')
+```
+
+### Count FAQ array
+```
+length(body('Parse_JSON')?['faqs'])
+```
+
+### Take first N FAQs for card preview
+```
+take(body('Parse_JSON')?['faqs'], 5)
+```
+
+### Calculate pass rate
+```
+if(equals(outputs('Total_Tests'), 0), 0, div(float(outputs('Count_Passed')), float(outputs('Total_Tests'))))
+```
+
+### Direct Line auth header
+```
+concat('Bearer ', items('For_each_agent')?['cr_directlinesecret'])
+```
+
+### Build knowledge folder path
+```
+concat('/Knowledge/', replace(items('Agent')?['cr_agentname'], ' ', '-'), '/')
+```
+
+### Generate FAQ filename
+```
+concat(items('SourceDoc')?['cr_category'], '-', replace(items('SourceDoc')?['cr_documentname'], '.pdf', ''), '-FAQs.docx')
+```
+
+### Check if user is in a security group (Canvas App Power Fx)
+```
+// In App.OnStart:
+Set(varUserGroups, Office365Groups.ListGroupMemberships("me").value);
+Set(varAccessibleAgents, 
+  Filter(Agents, 
+    BUSecurityGroup in ForAll(varUserGroups, ThisRecord.id)
+  )
+);
+```
+
+---
+
+## 4. Knowledge File Format
+
+Generated FAQ documents must follow this format for optimal Copilot Studio retrieval:
+
+```
+[Agent Name] — Frequently Asked Questions
+Source: [Original Policy Document Name]
+Last updated: [date]
+
+Q: [Question — natural, conversational language]
+A: [Answer — direct, specific, self-contained]
+Reference: [Section name] | [SharePoint link to original document]
+
+---
+
+Q: [Next question]
+A: [Next answer]
+Reference: [Section] | [Link]
+
+---
+```
+
+### Format rules:
+- Q:/A: prefixes create clear chunk boundaries
+- Blank line between Q and A stays within the same chunk
+- Separator (---) between FAQ pairs reinforces boundaries
+- Each answer is self-contained (no cross-references)
+- Source links give the agent grounding for citations
+- No tables (chunk poorly), no nested bullets, no intro text
+
+---
+
+## 5. SharePoint Structure
+
+```
+/sites/FAQAgentFactory/
+├── Submissions/           (Library: BU uploads policy docs here)
+│   Columns: Category, Approver, TargetAgent, ProcessingStatus
+│
+├── Knowledge/             (Library: generated FAQ docs)
+│   ├── HR-Policy-Agent/   (Folder → Copilot Studio knowledge source)
+│   ├── IT-Policy-Agent/   (Folder → Copilot Studio knowledge source)
+│   └── Finance-Agent/     (Folder → Copilot Studio knowledge source)
+│
+└── Templates/             (Library: Word template for FAQ generation)
+    └── FAQ-Template.docx
+```
+
+---
+
+## 6. Agent Configuration Checklist
+
+### Per agent:
+- [ ] Agent created in Copilot Studio with generative orchestration
+- [ ] "Allow ungrounded responses" OFF
+- [ ] Agent instructions pasted (from template in solution design)
+- [ ] SharePoint knowledge source added (pointing to /Knowledge/[AgentName]/ folder)
+- [ ] Knowledge source status: Ready
+- [ ] Authentication: Authenticate with Microsoft
+- [ ] Teams channel enabled
+- [ ] Direct Line channel enabled
+- [ ] Bot ID recorded in Dataverse Agents table
+- [ ] Direct Line secret recorded in Dataverse Agents table
+- [ ] Knowledge folder URL recorded in Dataverse Agents table
+- [ ] BU security group ID recorded in Dataverse Agents table
+- [ ] Initial FAQ document published to knowledge folder
+- [ ] Initial test run completed
+- [ ] Test pass rate ≥ 80%
+
+---
+
+## 7. Troubleshooting
+
+### AI Builder returns invalid JSON
+**Fix:** Compose: `trim(replace(replace(output,'```json',''),'```',''))`
+
+### Adaptive Card too large
+**Fix:** Switch to summary card (show first 3-5 FAQs) + link to BU Self-Service App.
+
+### Agent says "I don't know" for content that exists
+**Causes:** Knowledge not indexed yet (wait 30 mins), Q/A split across chunks (check document format), auth mismatch.
+**Fix:** Test in Copilot Studio test pane (shows knowledge source hits). Check file status in Knowledge page.
+
+### Direct Line 403
+**Fix:** Verify Direct Line channel enabled in Copilot Studio. Regenerate secret. Update Agents table.
+
+### Test pass rate drops after content update
+**Fix:** Check if old test cases reference removed FAQs. Clean up orphaned test cases. Re-run test generation.
+
+### Canvas App shows no content for a user
+**Fix:** Check user's Entra group membership matches the Agent's BUSecurityGroup. Verify the Office365Groups connector is added to the app.
+
+### SharePoint connector auth errors in Copilot Studio
+**Fix:** Ensure agent auth is set to "Authenticate with Microsoft". User needs read access to the SharePoint site. Check Sites.Read.All and Files.Read.All permissions.
+
+
+
+################################################################################
+################################################################################
+##                                                                            ##
+##  [[ASSET 4]] v2 DATAVERSE SCHEMA QUICK REFERENCE                           ##
+##  Source: v2-dataverse-schema.md                                            ##
+##                                                                            ##
+################################################################################
+################################################################################
+
+
+# FAQ Agent Factory v2 — Dataverse Schema Quick Reference
+
+Publisher prefix: `cr` (replace with your actual prefix)
+
+---
+
+## Table 1: Agents (`cr_agent`)
+
+| Display Name | Schema Name | Type | Details |
+|---|---|---|---|
+| AgentName | cr_agentname | Text (primary, 200) | Display name |
+| Description | cr_description | Multiline text | What the agent covers |
+| OwningBU | cr_owningbu | Text | Business unit name |
+| BUSecurityGroup | cr_busecuritygroup | Text | Entra security group Object ID |
+| BotId | cr_botid | Text | Copilot Studio bot ID |
+| DirectLineSecret | cr_directlinesecret | Text | For test runner |
+| KnowledgeFolderURL | cr_knowledgefolderurl | URL | SharePoint folder path |
+| Status | cr_status | Choice | Active (default), Draft, Retired |
+| LastPublished | cr_lastpublished | Date/Time | Last FAQ doc saved |
+| TestPassRate | cr_testpassrate | Decimal (2dp) | 0.00–1.00 |
+| TotalFAQs | cr_totalfaqs | Whole number | Active FAQ count |
+| AgentInstructions | cr_agentinstructions | Multiline text | System instructions (reference copy) |
+
+---
+
+## Table 2: Source Documents (`cr_sourcedocument`)
+
+| Display Name | Schema Name | Type | Details |
+|---|---|---|---|
+| DocumentName | cr_documentname | Text (primary, 300) | Uploaded file name |
+| SharePointURL | cr_sharepointurl | URL | Link to file in Submissions library |
+| Agent | cr_agent | Lookup → Agents | Target agent |
+| Category | cr_category | Choice | HR, IT, Finance, Legal Ops, Facilities, Other |
+| SubmittedBy | cr_submittedby | Text | Submitter's email |
+| SubmittedDate | cr_submitteddate | Date/Time | Submission timestamp |
+| Status | cr_status | Choice | Processing, Extracted, Approved, Error, Archived |
+| FAQDocURL | cr_faqdocurl | URL | Link to generated FAQ doc in Knowledge folder |
+| FAQCount | cr_faqcount | Whole number | Extracted FAQ count |
+
+---
+
+## Table 3: FAQ Items (`cr_faqitem`)
+
+| Display Name | Schema Name | Type | Details |
+|---|---|---|---|
+| Title | cr_title | Text (primary, 500) | The FAQ question |
+| Answer | cr_answer | Multiline text | Approved answer |
+| SourceDocument | cr_sourcedocument | Lookup → Source Documents | Origin document |
+| Agent | cr_agent | Lookup → Agents | Target agent |
+| Category | cr_category | Choice | HR, IT, Finance, Legal Ops, Facilities, Other |
+| Status | cr_status | Choice | Pending Review, Approved, Rejected, Needs Update, Archived |
+| ApprovedBy | cr_approvedby | Text | Approver email |
+| ApprovedDate | cr_approveddate | Date | Last approval |
+| NextReviewDate | cr_nextreviewdate | Date | Auto: ApprovedDate + 90 days |
+| Active | cr_active | Yes/No (default: Yes) | Include in knowledge file? |
+| SortOrder | cr_sortorder | Whole number | Order in generated doc |
+| SourceSection | cr_sourcesection | Text | Section ref from original doc |
+
+---
+
+## Table 4: Test Cases (`cr_testcase`)
+
+| Display Name | Schema Name | Type | Details |
+|---|---|---|---|
+| TestQuestion | cr_testquestion | Text (primary, 500) | Paraphrased test question |
+| ExpectedAnswer | cr_expectedanswer | Multiline text | From linked FAQ |
+| LinkedFAQ | cr_linkedfaq | Lookup → FAQ Items | FAQ being tested |
+| Agent | cr_agent | Lookup → Agents | Agent to test |
+| LastResult | cr_lastresult | Choice | Pass, Fail, Not Run (default) |
+| LastRunDate | cr_lastrundate | Date/Time | Last execution |
+| ActualResponse | cr_actualresponse | Multiline text | Agent's response |
+| SimilarityScore | cr_similarityscore | Decimal (2dp) | 0.00–1.00 |
+| VariationType | cr_variationtype | Text | casual, scenario, partial, negative, followup |
+
+---
+
+## Table 5: Test Runs (`cr_testrun`)
+
+| Display Name | Schema Name | Type | Details |
+|---|---|---|---|
+| RunName | cr_runname | Text (primary, 200) | Auto: AgentName + DateTime |
+| Agent | cr_agent | Lookup → Agents | Tested agent |
+| RunDate | cr_rundate | Date/Time | Run start |
+| TotalTests | cr_totaltests | Whole number | Cases executed |
+| Passed | cr_passed | Whole number | Pass count |
+| Failed | cr_failed | Whole number | Fail count |
+| PassRate | cr_passrate | Decimal (2dp) | Passed / TotalTests |
+| Trigger | cr_trigger | Choice | Manual, Post-Publish, Scheduled |
+
+---
+
+## Relationships
+
+```
+Agents (1) ──→ (Many) Source Documents   [cr_agent on Source Documents]
+Agents (1) ──→ (Many) FAQ Items          [cr_agent on FAQ Items]
+Agents (1) ──→ (Many) Test Cases         [cr_agent on Test Cases]
+Agents (1) ──→ (Many) Test Runs          [cr_agent on Test Runs]
+Source Documents (1) ──→ (Many) FAQ Items [cr_sourcedocument on FAQ Items]
+FAQ Items (1) ──→ (Many) Test Cases      [cr_linkedfaq on Test Cases]
+```
+
+Build order: Agents → Source Documents → FAQ Items → Test Cases → Test Runs
+
+---
+
+## Views
+
+### Agents
+| View | Filter | Key Columns |
+|---|---|---|
+| All Active Agents | Status = Active | Name, BU, TotalFAQs, PassRate, LastPublished |
+| Needs Attention | Active AND (PassRate < 0.8 OR LastPublished > 90 days) | Name, BU, PassRate, LastPublished |
+
+### Source Documents
+| View | Filter | Key Columns |
+|---|---|---|
+| All Documents | None | Name, Agent, Category, Status, SubmittedDate |
+| Processing/Error | Status in (Processing, Error) | Name, Agent, Status, SubmittedDate |
+| By Agent | Grouped by Agent | Name, Category, Status, FAQCount |
+
+### FAQ Items
+| View | Filter | Key Columns |
+|---|---|---|
+| Approved | Status = Approved | Title, Agent, Category, ApprovedDate, NextReviewDate |
+| Pending Review | Status = Pending Review | Title, Agent, Category, CreatedOn |
+| Review Due | NextReviewDate ≤ today AND Approved | Title, Agent, ApprovedBy, NextReviewDate |
+| By Source Document | Grouped by SourceDocument | Title, Status, Active, SortOrder |
+
+### Test Cases
+| View | Filter | Key Columns |
+|---|---|---|
+| Failed | LastResult = Fail | Question, Agent, Expected, Actual, Score |
+| By Agent | Grouped by Agent | Question, LinkedFAQ, Result, Score |
+
+### Test Runs
+| View | Filter | Key Columns |
+|---|---|---|
+| Recent | None, sorted RunDate desc | Name, Agent, Date, Total, Passed, Failed, Rate |
+
+---
+
+## Key Queries (for Power Automate)
+
+### Approved FAQs for a document (Flow 2)
+```
+Filter: cr_sourcedocument/cr_sourcedocumentid eq '{DocId}'
+        and cr_status eq 'Approved' and cr_active eq true
+Sort: cr_category asc, cr_sortorder asc
+```
+
+### All active FAQs for an agent (full regeneration)
+```
+Filter: cr_agent/cr_agentid eq '{AgentId}'
+        and cr_status eq 'Approved' and cr_active eq true
+Sort: cr_sourcedocument asc, cr_sortorder asc
+```
+
+### Test cases for an agent (test runner)
+```
+Filter: cr_agent/cr_agentid eq '{AgentId}'
+        and cr_lastresult ne 'Archived'
+```
+
+### FAQs due for review
+```
+Filter: cr_nextreviewdate le '@{utcNow()}'
+        and cr_status eq 'Approved'
+Sort: cr_approvedby asc
+```
+
+### Agents accessible by security group (Canvas App)
+```
+Filter: cr_busecuritygroup in [user's group IDs]
+        and cr_status eq 'Active'
+```
+
+
+
+################################################################################
+################################################################################
+##                                                                            ##
+##  [[ASSET 5]] FAQ FORGE SOLUTION DESIGN DRAFT                               ##
+##  Source: faq-forge-solution-design-draft.txt                               ##
+##  Format: Firm's Power Platform & Dynamics 365 Solution Design template     ##
+##                                                                            ##
+################################################################################
+################################################################################
+
+
+================================================================
+FAQ FORGE
+Power Platform & Dynamics 365 Solution Design
+================================================================
+
+Document Title: FAQ Forge - Solution Design
+Solution Name:  FAQ Forge
+Version:        1.0 (Draft)
+Date:           April 2026
+Author:         Sean [Surname]
+Status:         Draft for Review
+
+================================================================
+1. TABLE OF CONTENTS
+================================================================
+
+HIGH LEVEL DESIGN
+  1. Introduction
+  2. Stakeholders
+  3. Requirements
+  4. Solution Overview
+  5. Cost and Licensing
+  6. Support Arrangements
+
+LOW LEVEL DESIGN
+  1. Integration Interfaces
+  2. Data Model and Entity Design
+  3. Security Model
+  4. Extensibility and Custom Code
+  5. Artificial Intelligence
+  6. Reporting and Analytics
+  7. Environment Management and Deployment Strategy
+  8. Testing Strategy
+  9. Monitoring and Logging
+  10. Performance and Scalability
+  11. Data Protection
+  12. Technical Debt and Risks
+  13. Glossary
+
+
+================================================================
+2. VERSION HISTORY
+================================================================
+
+| Version | Date         | Author        | Changes                                    |
+|---------|--------------|---------------|--------------------------------------------|
+| 0.1     | April 2026   | Sean          | Initial draft                              |
+| 1.0     | TBC          | Sean          | First release for review                   |
+
+
+================================================================
+3. HIGH LEVEL DESIGN SECTIONS
+================================================================
+
+----------------------------------------------------------------
+3.1  INTRODUCTION
+----------------------------------------------------------------
+
+3.1.1  Purpose
+
+FAQ Forge is a repeatable system for creating, managing, and 
+testing Microsoft Copilot Studio FAQ agents at [Firm Name]. It 
+enables business units to self-serve the creation and 
+maintenance of FAQ content from their policy documents while 
+giving the agent engineering team centralised oversight, 
+quality assurance, and lifecycle management.
+
+3.1.2  Background and Drivers
+
+The firm currently builds Copilot Studio agents on a per-project 
+basis, with significant manual effort required to:
+
+  - Convert policy documents into FAQ-ready content
+  - Coordinate review and approval cycles with business units
+  - Validate agent answer quality on an ongoing basis
+  - Maintain content currency as policies evolve
+
+This results in inconsistent agent quality, slow time-to-deploy, 
+heavy dependency on the engineering team for routine content 
+updates, and limited visibility into agent performance over time.
+
+FAQ Forge addresses these issues by:
+
+  - Automating FAQ extraction from policy documents using AI
+  - Providing a structured BU approval workflow via Microsoft Teams
+  - Auto-generating knowledge source files from approved content
+  - Running automated regression tests after every content change
+  - Giving business units self-service tools for ongoing maintenance
+
+3.1.3  Scope
+
+In Scope:
+  - All internal-facing Copilot Studio FAQ agents at the firm
+  - Agents deployed via Microsoft Teams
+  - Policy and procedure content from any business unit
+  - Automated test coverage and regression detection
+  - Content lifecycle management (create, approve, edit, retire)
+
+Out of Scope:
+  - Client-facing or external agents
+  - Agents requiring complex multi-step workflows (e.g. transactional 
+    agents that perform actions in line-of-business systems)
+  - Voice-enabled agents
+  - Multi-language content (initial release: English only)
+
+3.1.4  Document Conventions
+
+  - "FAQ" refers to a single question-and-answer pair
+  - "Source Document" refers to an original policy document 
+    submitted by a business unit
+  - "Knowledge Source" refers to a SharePoint folder configured 
+    in Copilot Studio as a grounding data source
+  - "Agent" refers to a Copilot Studio bot deployed to Teams
+
+
+----------------------------------------------------------------
+3.2  STAKEHOLDERS
+----------------------------------------------------------------
+
+3.2.1  Stakeholder Groups
+
+| Role                       | Responsibilities                                        |
+|----------------------------|---------------------------------------------------------|
+| Agent Engineering Team     | Build and maintain solution, onboard new agents,        |
+|                            | monitor quality, support BUs                            |
+| BU FAQ Contributors        | Submit policy documents, edit FAQs, manage their        |
+|                            | own content via the self-service app                    |
+| BU Approvers               | Review and approve extracted FAQs via Teams Adaptive    |
+|                            | Cards before publication                                |
+| End Users (Employees)      | Consume agent responses via Teams                       |
+| IT Administration          | Manage Power Platform environments, licenses,           |
+|                            | security groups                                         |
+| Information Governance     | Approve data handling, content classification,          |
+|                            | retention policies                                      |
+| Risk and Compliance        | Sign off on policy regarding agent answer quality       |
+|                            | and audit trail requirements                            |
+
+3.2.2  RACI Summary
+
+[To be completed with BU input]
+
+
+----------------------------------------------------------------
+3.3  REQUIREMENTS
+----------------------------------------------------------------
+
+3.3.1  Functional Requirements
+
+FR-01  BU users must be able to submit policy documents for FAQ 
+       extraction via a SharePoint form with required metadata.
+
+FR-02  The system must extract FAQs from submitted documents 
+       using AI Builder, capturing the entire content of the 
+       document as question/answer pairs.
+
+FR-03  Submitters must receive an Adaptive Card in Teams allowing 
+       them to review, edit, approve, or reject extracted FAQs.
+
+FR-04  Approved FAQs must be automatically formatted into a 
+       knowledge source file and saved to the agent's SharePoint 
+       knowledge folder, where Copilot Studio will index them.
+
+FR-05  The system must automatically generate test cases for each 
+       FAQ (paraphrased questions with expected answers) and run 
+       them against the agent via the Direct Line API.
+
+FR-06  Test results must be stored in Dataverse and surfaced in 
+       the management app with pass/fail status and trend analysis.
+
+FR-07  BU users must be able to view, edit, or delete their own 
+       FAQ content via a Canvas app, scoped by Entra security 
+       group membership.
+
+FR-08  Agent engineers must have a model-driven app providing 
+       full visibility across all agents, content, and test results.
+
+FR-09  The system must support periodic review reminders to BU 
+       approvers based on a configurable review cycle (default: 
+       90 days).
+
+FR-10  All agent answers must be grounded in approved FAQ 
+       content. Agents must not use general AI knowledge.
+
+3.3.2  Non-Functional Requirements
+
+NFR-01 The system must support up to 50 concurrent FAQ agents 
+       across the firm.
+
+NFR-02 FAQ extraction from a typical policy document (under 25 
+       pages) must complete within 5 minutes.
+
+NFR-03 Agent response latency must not exceed 5 seconds for 
+       typical questions.
+
+NFR-04 The system must enforce role-based access: BU users see 
+       only their BU's content; agent engineers see all content.
+
+NFR-05 All content changes must be auditable, including who 
+       approved, when, and from which source document.
+
+NFR-06 Test pass rate per agent must be measurable and trended 
+       over time, with alerting when pass rate drops below 80%.
+
+NFR-07 The solution must be portable across Power Platform 
+       environments (dev, test, prod) via solution packaging.
+
+3.3.3  Constraints
+
+  - Must use Microsoft Power Platform stack (no third-party 
+    integration platforms)
+  - All data must remain within the firm's Microsoft 365 tenant
+  - Agents must deploy to Microsoft Teams only
+  - Knowledge sources must reside in SharePoint (firm policy)
+
+
+----------------------------------------------------------------
+3.4  SOLUTION OVERVIEW
+----------------------------------------------------------------
+
+3.4.1  Conceptual Architecture
+
+FAQ Forge consists of three Power Automate flows, two Power Apps, 
+five Dataverse tables, and a SharePoint structure that serves as 
+the knowledge source for Copilot Studio agents.
+
+The end-to-end user journey:
+
+  1. SUBMIT
+     A BU user uploads a policy document via SharePoint with 
+     metadata (category, target agent, approver).
+
+  2. EXTRACT
+     A flow extracts the document text using AI Builder, then 
+     uses a GPT prompt to convert the entire document into 
+     structured FAQ pairs.
+
+  3. REVIEW
+     The submitter receives an Adaptive Card in Teams. They can 
+     approve all, edit individual FAQs inline, or open the 
+     self-service app for detailed review.
+
+  4. PUBLISH
+     On approval, a flow generates a formatted FAQ document from 
+     a Word template and saves it to the agent's SharePoint 
+     knowledge folder. Copilot Studio detects the new file and 
+     re-indexes automatically.
+
+  5. TEST
+     A second flow generates paraphrased test questions for each 
+     FAQ, runs them against the agent via the Direct Line API, 
+     evaluates responses using AI Builder, and stores results.
+
+  6. SELF-SERVE
+     BU users manage their own content via the FAQ Forge 
+     Self-Service Canvas App, scoped by security group.
+
+  7. MONITOR
+     Agent engineers oversee everything via the FAQ Forge 
+     Management App (model-driven), with dashboards, test trends, 
+     and the ability to request BU reviews on demand.
+
+3.4.2  Technology Components
+
+| Component               | Technology                                          |
+|-------------------------|-----------------------------------------------------|
+| Agent Platform          | Microsoft Copilot Studio                            |
+| Orchestration           | Power Automate (Premium)                            |
+| AI Capabilities         | AI Builder (GPT prompts) + Azure OpenAI (in CSt)    |
+| Data Store              | Microsoft Dataverse                                 |
+| Document Repository     | Microsoft SharePoint Online                         |
+| User Interface (BU)     | Power Apps Canvas App                               |
+| User Interface (Eng)    | Power Apps Model-Driven App                         |
+| Approval Workflow       | Microsoft Teams (Adaptive Cards)                    |
+| Deployment Channel      | Microsoft Teams                                     |
+| Testing Interface       | Bot Framework Direct Line API                       |
+| Identity and Access     | Microsoft Entra ID security groups                  |
+
+3.4.3  High-Level Process Flow
+
+  [DIAGRAM PLACEHOLDER: Insert Visio architecture diagram here]
+
+  See Section 4.1 (Integration Interfaces) and Section 4.2 
+  (Data Model) for detailed technical design.
+
+3.4.4  Knowledge Source Strategy
+
+Each agent has its own SharePoint folder under a central FAQ 
+Forge site. Generated FAQ documents (one per source policy) are 
+saved into the agent's folder. Copilot Studio reads from this 
+folder via the SharePoint connector.
+
+[DESIGN DECISION TO CONFIRM] An optional secondary knowledge 
+source containing the original source documents may be added 
+to each agent. The agent's instructions and knowledge source 
+descriptions would prioritise FAQs first, with source documents 
+as fallback. Fallback responses would be explicitly flagged to 
+the user as "unverified" to maintain quality and audit integrity.
+
+
+----------------------------------------------------------------
+3.5  COST AND LICENSING
+----------------------------------------------------------------
+
+3.5.1  Required Licences
+
+| Product               | Licence Type            | Quantity Driver         |
+|-----------------------|-------------------------|-------------------------|
+| Copilot Studio        | Per-agent or capacity   | Number of agents +      |
+|                       |                         | message volume          |
+| Power Automate        | Premium per user        | Agent engineers + flow  |
+|                       |                         | service account         |
+| AI Builder            | Credits (consumption)   | FAQ extractions +       |
+|                       |                         | test evaluations        |
+| Power Apps            | Premium per user        | All BU contributors +   |
+|                       |                         | engineers               |
+| Dataverse             | Capacity (included)     | Storage for FAQs and    |
+|                       |                         | test results            |
+| SharePoint Online     | Included in M365        | Knowledge folders and   |
+|                       |                         | submission library      |
+| Microsoft Teams       | Included in M365        | Deployment channel      |
+
+3.5.2  Estimated Consumption
+
+  - AI Builder credits: approximately 1 credit per document 
+    extraction, plus 1 credit per test case evaluation. 
+    A 50-FAQ document with 100 test cases would consume approx. 
+    101 credits.
+  - Copilot Studio messages: charged per message turn. Volume 
+    estimate: [to be calculated based on user research]
+  - Dataverse storage: minimal. 10,000 FAQs uses well under 
+    1 GB.
+
+3.5.3  Cost Estimation
+
+[To be completed with current Microsoft pricing and projected 
+volumes]
+
+
+----------------------------------------------------------------
+3.6  SUPPORT ARRANGEMENTS
+----------------------------------------------------------------
+
+3.6.1  Support Tiers
+
+| Tier   | Owner                       | Scope                             |
+|--------|-----------------------------|-----------------------------------|
+| Tier 1 | IT Service Desk             | User access issues, basic         |
+|        |                             | how-to questions                  |
+| Tier 2 | Agent Engineering Team      | Agent quality issues, content     |
+|        |                             | problems, test failures           |
+| Tier 3 | Power Platform CoE          | Platform issues, environment      |
+|        |                             | problems, complex bugs            |
+| Tier 4 | Microsoft Support           | Platform-level escalations        |
+
+3.6.2  BU Responsibilities
+
+Each BU using FAQ Forge nominates:
+  - A primary contact responsible for content quality
+  - Approvers authorised to sign off on FAQ content
+  - A backup contact for cover during absence
+
+3.6.3  SLAs
+
+  - FAQ extraction completion: under 10 minutes from submission
+  - Adaptive Card review notification: under 15 minutes
+  - Agent response indexing after publish: under 30 minutes
+  - Test suite execution: under 30 minutes for 50-test suites
+  - Critical agent down: 4-hour response, 24-hour resolution
+  - Non-critical issues: 1 business day response
+
+
+================================================================
+4. LOW LEVEL DESIGN SECTIONS
+================================================================
+
+----------------------------------------------------------------
+4.1  INTEGRATION INTERFACES
+----------------------------------------------------------------
+
+4.1.1  Internal Integrations
+
+| Source                | Destination           | Method                    |
+|-----------------------|-----------------------|---------------------------|
+| SharePoint Submissions| Power Automate        | "When item created"       |
+|                       |                       | trigger                   |
+| Power Automate        | AI Builder            | Native action (GPT prompt)|
+| Power Automate        | Dataverse             | Native connector          |
+| Power Automate        | Microsoft Teams       | Adaptive Card actions     |
+| Power Automate        | SharePoint Knowledge  | Create file action        |
+| SharePoint Knowledge  | Copilot Studio        | SharePoint knowledge      |
+|                       |                       | source connector          |
+| Power Automate        | Copilot Studio Agent  | Direct Line REST API      |
+| Canvas App            | Microsoft Graph       | Group membership lookup   |
+| Canvas App            | Dataverse             | Native connector          |
+| Canvas App            | SharePoint            | File upload via connector |
+
+4.1.2  Direct Line API Specification
+
+Used by the test runner flow. See Technical Reference for full 
+endpoint details.
+
+  Authentication: Bearer token (Direct Line secret per agent)
+  Endpoints:
+    POST /v3/directline/conversations
+    POST /v3/directline/conversations/{id}/activities
+    GET  /v3/directline/conversations/{id}/activities
+
+4.1.3  External Integrations
+
+None in initial release. Future consideration: integration with 
+the firm's policy management system to auto-trigger FAQ 
+regeneration when a policy is updated.
+
+
+----------------------------------------------------------------
+4.2  DATA MODEL AND ENTITY DESIGN
+----------------------------------------------------------------
+
+4.2.1  Dataverse Tables
+
+Five custom tables, all with publisher prefix "cr_":
+
+  1. cr_agent          - Registry of all FAQ Forge agents
+  2. cr_sourcedocument - Tracks submitted policy documents
+  3. cr_faqitem        - Individual FAQ entries
+  4. cr_testcase       - Generated test questions
+  5. cr_testrun        - History of test executions
+
+[Detailed column definitions in Appendix A: Dataverse Schema 
+Reference]
+
+4.2.2  Entity Relationship Diagram
+
+  cr_agent (1) ----< (N) cr_sourcedocument
+  cr_agent (1) ----< (N) cr_faqitem
+  cr_agent (1) ----< (N) cr_testcase
+  cr_agent (1) ----< (N) cr_testrun
+  cr_sourcedocument (1) ----< (N) cr_faqitem
+  cr_faqitem (1) ----< (N) cr_testcase
+
+4.2.3  SharePoint Information Architecture
+
+Site: /sites/FAQForge/
+
+  Libraries:
+    - Submissions/      (BU uploads land here)
+    - Knowledge/        (generated FAQ docs, organised in subfolders)
+        + [Agent-Name]/ (one folder per agent, configured as 
+                        knowledge source)
+    - Templates/        (Word templates for FAQ document generation)
+
+  Lists:
+    - AgentRegistry     (lightweight reference list, mirrors key 
+                        Agent fields for SharePoint-side automation)
+
+
+----------------------------------------------------------------
+4.3  SECURITY MODEL
+----------------------------------------------------------------
+
+4.3.1  Identity
+
+All authentication uses Microsoft Entra ID (Azure AD). No 
+service accounts for end-user access. Service principal used 
+only for the test runner's Direct Line calls.
+
+4.3.2  Access Control Matrix
+
+| Persona            | SharePoint Sub. | Knowledge | BU App   | Mgmt App | Dataverse Tables |
+|--------------------|-----------------|-----------|----------|----------|------------------|
+| BU Contributor     | Add only        | Read*     | Use*     | None     | Filtered*        |
+| BU Approver        | Add + Edit      | Read*     | Use*     | None     | Filtered*        |
+| Agent Engineer     | Full            | Full      | Use      | Full     | Full             |
+| End User           | None            | None**    | None     | None     | None             |
+| Admin              | Full            | Full      | Manage   | Manage   | Full             |
+
+  * Filtered to BU's security group scope
+  ** End users access content only via the deployed agent in Teams
+
+4.3.3  Security Groups
+
+One Entra security group per BU/agent scope. Group Object IDs 
+stored in cr_agent.cr_busecuritygroup. The Canvas App checks 
+user's group memberships at runtime to determine accessible 
+content.
+
+4.3.4  Dataverse Security Roles
+
+  - FAQ Forge Contributor (custom): Read on Agents and Source 
+    Documents (filtered), Read/Write on FAQ Items (filtered).
+  - FAQ Forge Approver (custom): Above + Approve permission on 
+    FAQ Items.
+  - FAQ Forge Engineer (custom): Full access to all tables.
+  - System Administrator: Standard.
+
+4.3.5  Data Classification
+
+All FAQ content is classified at the level of the underlying 
+source policy document. The system inherits sensitivity labels 
+from SharePoint where applicable. Generated FAQ documents 
+inherit the label of the source document.
+
+
+----------------------------------------------------------------
+4.4  EXTENSIBILITY AND CUSTOM CODE
+----------------------------------------------------------------
+
+4.4.1  Custom Code Components
+
+The solution is primarily low-code. Custom code is limited to:
+
+  - Power Automate expressions (Power Fx)
+  - Adaptive Card JSON templates
+  - Power Apps Power Fx formulas (Canvas App)
+  - HTTP action configurations for Direct Line API calls
+  - JSON schemas for AI Builder responses
+
+No custom plugins, custom connectors, or PCF controls in the 
+initial release.
+
+4.4.2  Future Extensibility Points
+
+  - Custom connector for the firm's policy management system 
+    (auto-trigger FAQ updates when policies change)
+  - PCF control for inline FAQ editing in the Management App
+  - Custom Dataverse plugin for advanced approval workflows
+  - Power BI embedded reporting in the Management App
+
+
+----------------------------------------------------------------
+4.5  ARTIFICIAL INTELLIGENCE
+----------------------------------------------------------------
+
+4.5.1  AI Components
+
+  Component 1: FAQ Extraction
+    Technology: AI Builder "Create text with GPT" action
+    Model: GPT-4o or GPT-4.1 (per AI Builder default)
+    Purpose: Convert policy document text into structured FAQ pairs
+    Input: Plain text extracted from PDF/DOCX
+    Output: JSON array of FAQ objects
+
+  Component 2: Test Case Generation
+    Technology: AI Builder "Create text with GPT" action
+    Model: GPT-4o or GPT-4.1
+    Purpose: Generate paraphrased test questions from FAQs
+    Input: FAQ JSON array
+    Output: JSON array of test cases (max 100)
+
+  Component 3: Test Response Evaluation
+    Technology: AI Builder "Create text with GPT" action
+    Model: GPT-4o or GPT-4.1
+    Purpose: Compare expected vs actual answer, return similarity score
+    Input: Two text strings
+    Output: JSON with score (0-1) and pass/fail boolean
+
+  Component 4: FAQ Agent Response Generation
+    Technology: Copilot Studio (Azure OpenAI under the hood)
+    Model: Default (currently GPT-4o or GPT-4.1)
+    Purpose: Generate user-facing responses grounded in knowledge sources
+    Configuration: Generative orchestration enabled, 
+                   "Allow ungrounded responses" disabled
+
+4.5.2  Prompt Library
+
+All prompts are stored in:
+  - The AI Builder prompt library (for reuse and version control)
+  - The FAQ Forge solution documentation (for reference)
+  - Source control (recommended) for change tracking
+
+[Full prompt text in Appendix B: AI Prompts]
+
+4.5.3  AI Governance
+
+  - Prompts reviewed by Information Governance before deployment
+  - Outputs validated through the test framework before publishing
+  - All generated content (FAQs, tests) undergoes human approval 
+    before reaching end users
+  - Agent responses always grounded in approved content
+  - No PII or client confidential data should be present in 
+    submitted policy documents
+
+
+----------------------------------------------------------------
+4.6  REPORTING AND ANALYTICS
+----------------------------------------------------------------
+
+4.6.1  In-App Reporting (Management App)
+
+Built-in dashboards in the model-driven app:
+  - Total active agents
+  - Total approved FAQs
+  - Average test pass rate across agents
+  - Agents needing attention (pass rate below 80% or review overdue)
+  - Pass rate trend over time (line chart, per agent)
+  - FAQs by status, by category
+  - Recent test runs with drill-through
+
+4.6.2  Native Copilot Studio Analytics
+
+  - Conversation volume per agent (built-in)
+  - User satisfaction (CSAT) where collected
+  - Generated answer rate and quality (built-in metrics)
+  - Knowledge source utilisation reports
+
+4.6.3  Power BI (Future)
+
+A Power BI dashboard for executive-level reporting is planned 
+for a future release, surfacing:
+  - Cross-agent comparison
+  - BU adoption metrics
+  - Cost-per-question trends
+  - Content freshness indicators
+
+
+----------------------------------------------------------------
+4.7  ENVIRONMENT MANAGEMENT AND DEPLOYMENT STRATEGY
+----------------------------------------------------------------
+
+4.7.1  Environments
+
+| Environment | Purpose                          | Refresh Strategy        |
+|-------------|----------------------------------|-------------------------|
+| Development | Build and unit-test new features | Refresh from Prod       |
+|             |                                  | quarterly (data only)   |
+| Test/UAT    | BU testing, integration testing  | Refresh on demand       |
+| Production  | Live system                      | Backups daily, retained |
+|             |                                  | per firm policy         |
+
+4.7.2  Solution Packaging
+
+All components packaged in a single managed solution:
+  - Solution name: FAQForge
+  - Publisher: [Firm Name]
+  - Prefix: cr (or firm-specific)
+  - Components: 5 tables, all flows, all apps, security roles, 
+    sitemap, dashboards
+
+Note: Copilot Studio agents are NOT included in the solution 
+import (Copilot Studio agents have their own ALM model). Agents 
+are recreated per environment using the documented configuration 
+checklist.
+
+4.7.3  Deployment Process
+
+  1. Export managed solution from Dev
+  2. Import into Test
+  3. UAT with selected BU representatives
+  4. Approval gate: BU sign-off + engineering review
+  5. Import into Prod
+  6. Post-deployment smoke tests
+  7. Monitor for 48 hours
+
+4.7.4  ALM Recommendations
+
+  - Use Power Platform Pipelines for solution promotion
+  - Source control all flow JSON exports
+  - Document all environment variables
+  - Maintain a change log per release
+
+
+----------------------------------------------------------------
+4.8  TESTING STRATEGY
+----------------------------------------------------------------
+
+4.8.1  Test Levels
+
+  Unit Testing:
+    - Each Power Automate flow tested in isolation with sample 
+      inputs
+    - AI Builder prompts tested via the prompt builder before 
+      deployment
+
+  Integration Testing:
+    - End-to-end pipeline test: submit document, verify FAQ 
+      generation, approval, knowledge file creation, test 
+      execution
+
+  User Acceptance Testing:
+    - BU representatives upload real policy documents
+    - Verify FAQ accuracy and tone
+    - Confirm Adaptive Card experience is intuitive
+    - Test self-service app for content management
+
+  Regression Testing:
+    - Automated test suite runs after every content publish
+    - Scheduled weekly run of all agents' test suites
+    - Pass rate threshold: 80%
+
+4.8.2  Test Data
+
+Synthetic policy documents created for development and test 
+environments. No production data used outside Production.
+
+4.8.3  Acceptance Criteria
+
+The solution is acceptable for production release when:
+  - All functional requirements (FR-01 to FR-10) verified
+  - All NFRs measured and within thresholds
+  - At least one BU has completed UAT
+  - Pilot agent achieves 80%+ test pass rate
+  - Information Governance has signed off
+  - Risk and Compliance have signed off
+
+
+----------------------------------------------------------------
+4.9  MONITORING AND LOGGING
+----------------------------------------------------------------
+
+4.9.1  Monitoring Components
+
+  - Power Automate flow run history (built-in)
+  - Dataverse audit log (enabled on key tables)
+  - SharePoint version history (knowledge files)
+  - Copilot Studio analytics (per agent)
+  - Test Run history (cr_testrun table)
+
+4.9.2  Alerting
+
+  - Flow failures: email alert to engineering team
+  - Test pass rate drops below 80%: notification to agent owner
+  - Agent unavailable (test run cannot connect): immediate alert
+  - Knowledge source indexing failure: alert via SharePoint
+
+4.9.3  Audit Trail
+
+All FAQ content changes are tracked:
+  - Who created the FAQ (extraction flow audit)
+  - Who approved the FAQ (Adaptive Card response stored)
+  - Who edited the FAQ (Dataverse field-level audit)
+  - When content was published to knowledge source
+  - All test executions with results
+
+
+----------------------------------------------------------------
+4.10  PERFORMANCE AND SCALABILITY
+----------------------------------------------------------------
+
+4.10.1  Expected Volumes (Year 1)
+
+  - Number of agents: 5-15
+  - FAQs per agent: 50-300
+  - Total FAQs across system: up to 5,000
+  - Source documents submitted per month: up to 50
+  - Test cases per agent: 100-500
+  - Test runs per week per agent: 1-2
+  - End-user agent interactions per day: estimate to be 
+    determined per BU
+
+4.10.2  Performance Considerations
+
+  - FAQ extraction takes 1-5 minutes per document depending on 
+    size
+  - Test suite execution takes 15-25 minutes per 50 tests
+  - SharePoint re-indexing after file save: 5-30 minutes
+  - Adaptive Card response within seconds
+
+4.10.3  Scaling Strategy
+
+  - Vertical: Power Platform handles scaling automatically for 
+    most components
+  - Dataverse: storage scales linearly with content volume
+  - AI Builder: monitored monthly; credit packs added as needed
+  - Direct Line: rate-limited to 1 message per second per 
+    conversation; test runner respects this
+
+4.10.4  Bottlenecks Identified
+
+  - SharePoint re-indexing delay is the main user-visible latency
+  - AI Builder GPT response time is variable (10-60 seconds)
+  - Direct Line polling adds overhead to test execution
+
+
+----------------------------------------------------------------
+4.11  DATA PROTECTION
+----------------------------------------------------------------
+
+4.11.1  Data Residency
+
+All data remains within the firm's Microsoft 365 tenant. 
+Specific Dataverse environment region: [to be confirmed with IT]
+
+4.11.2  Data Retention
+
+  - FAQ content: retained while parent agent is Active
+  - Test results: retained for 12 months for trend analysis
+  - Source documents in Submissions library: retained for 24 months
+  - Generated FAQ documents in Knowledge folders: live for as long 
+    as the agent is Active
+  - Audit logs: per Power Platform default retention
+
+4.11.3  Sensitivity and Classification
+
+  - Policy documents inherit firm classification labels
+  - FAQs inherit classification from source document
+  - Generated knowledge files inherit classification
+  - System does not store or process client-confidential data
+
+4.11.4  Privacy Considerations
+
+  - No personal data stored in FAQ content (policies are 
+    organisational, not personal)
+  - User identifiers (email, name) stored only in audit fields 
+    (SubmittedBy, ApprovedBy)
+  - End-user conversation logs handled per Copilot Studio's 
+    standard privacy controls
+
+4.11.5  Data Loss Prevention
+
+  - DLP policies applied at the Power Platform environment level
+  - SharePoint connector restricted to the FAQ Forge site only 
+    where possible
+  - No external connectors enabled in the FAQ Forge environment
+
+
+----------------------------------------------------------------
+4.12  TECHNICAL DEBT AND RISKS
+----------------------------------------------------------------
+
+4.12.1  Known Risks
+
+| Risk                                        | Impact   | Likelihood | Mitigation                              |
+|---------------------------------------------|----------|------------|-----------------------------------------|
+| AI Builder returns malformed JSON           | Medium   | Medium     | JSON cleanup expressions; fallback     |
+|                                             |          |            | error handling sends notification      |
+| SharePoint re-indexing delay confuses users | Low      | High       | Communicate 30-min delay in UI         |
+| BU users don't engage with approval cards   | High     | Medium     | Training; escalation flow if no        |
+|                                             |          |            | response in 5 days                     |
+| Test pass rate degrades over time           | Medium   | Medium     | Scheduled tests + alerting; quarterly  |
+|                                             |          |            | content review                         |
+| Adaptive Card 28KB limit exceeded for large | Medium   | Low        | Switch to summary card + app link      |
+| FAQ sets                                    |          |            |                                        |
+| Direct Line API changes break test runner   | High     | Low        | Microsoft maintains API stability;     |
+|                                             |          |            | monitor change announcements           |
+| Source policy document uses tables/images   | Medium   | Medium     | AI Builder OCR + table extraction;     |
+| not handled well by extraction              |          |            | manual FAQ entry as fallback           |
+| Multiple BUs editing same FAQ concurrently  | Low      | Low        | Dataverse last-write-wins; warn in app |
+
+4.12.2  Technical Debt (Initial Release)
+
+  - Manual setup of Copilot Studio agents (Phase 5 in build 
+    guide). Future: automate via Dataverse Copilot Components API.
+  - No multi-language support. Add per-BU as needed.
+  - Test evaluation uses single LLM call. Future: multi-judge 
+    consensus for higher reliability.
+  - Knowledge source dual-fallback (FAQ then source doc) is a 
+    design option requiring confirmation. See Section 3.4.4.
+
+4.12.3  Assumptions
+
+  - All BUs have nominated approvers and contributors
+  - Policy documents are reasonably well-structured (headings, 
+    sections)
+  - Microsoft Teams is the standard channel for all internal 
+    communications
+  - Power Platform licences are budgeted and approved
+
+
+----------------------------------------------------------------
+4.13  GLOSSARY
+----------------------------------------------------------------
+
+  Adaptive Card
+    A JSON-based UI element rendered in Microsoft Teams (and 
+    other hosts) used here for FAQ review workflows.
+
+  Agent
+    A Copilot Studio bot deployed to Microsoft Teams that 
+    answers user questions using configured knowledge sources.
+
+  AI Builder
+    Microsoft's low-code AI service within Power Platform, used 
+    here for GPT-based prompts.
+
+  Canvas App
+    A Power Apps application built with a free-form designer, 
+    used here for the BU Self-Service interface.
+
+  Copilot Studio
+    Microsoft's platform for building and deploying AI agents.
+
+  Dataverse
+    Microsoft's structured data platform used for managing FAQ 
+    content, agents, and test results.
+
+  Direct Line API
+    The REST API for sending messages to and receiving responses 
+    from a Bot Framework or Copilot Studio agent. Used here for 
+    automated testing.
+
+  FAQ
+    A Frequently Asked Question entry consisting of a question 
+    and its approved answer.
+
+  File Group
+    A Copilot Studio knowledge source feature that groups files 
+    with shared instructions. Not used in this solution (we use 
+    SharePoint folders instead).
+
+  Generative Orchestration
+    Copilot Studio's mode where the AI orchestrator decides 
+    which knowledge sources, tools, or topics to invoke based 
+    on the user's message.
+
+  Knowledge Source
+    A data source configured in Copilot Studio that the agent 
+    uses to ground its responses. In FAQ Forge, this is a 
+    SharePoint folder per agent.
+
+  Model-Driven App
+    A Power Apps application generated from Dataverse table 
+    structures, used here for the engineering Management App.
+
+  Power Automate
+    Microsoft's workflow automation service used for all 
+    backend orchestration.
+
+  Power Fx
+    The formula language used in Power Apps and Copilot Studio.
+
+  Source Document
+    An original policy document submitted by a BU for FAQ 
+    extraction.
+
+  Test Case
+    A paraphrased version of a FAQ question used to validate 
+    the agent can handle real-world phrasings.
+
+  Test Run
+    An execution of all test cases against an agent, producing 
+    pass/fail results.
+
+
+================================================================
+APPENDICES
+================================================================
+
+Appendix A: Dataverse Schema Reference
+  [See separate document: v2-dataverse-schema.md]
+
+Appendix B: AI Prompts
+  [See solution design document: faq-agent-factory-v2.docx, 
+   Section 4: AI Prompts]
+
+Appendix C: Adaptive Card Templates
+  [See separate document: v2-technical-reference.md]
+
+Appendix D: Direct Line API Patterns
+  [See separate document: v2-technical-reference.md]
+
+Appendix E: Build Guide
+  [See solution design document: faq-agent-factory-v2.docx, 
+   Section 3: Implementation Guide]
+
+
+================================================================
+END OF DOCUMENT
+================================================================
+
+
+
+################################################################################
+END OF COMBINED ASSETS FILE
+################################################################################
