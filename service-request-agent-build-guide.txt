@@ -1,0 +1,1484 @@
+================================================================================
+SERVICE REQUEST AGENT — COMPLETE BUILD GUIDE
+================================================================================
+Version: 1.0
+Scope:   Just Print Me (Phase 1)
+Stack:   Copilot Studio (Generative Orchestration), Power Automate,
+         Dataverse, SharePoint, Adaptive Cards
+
+================================================================================
+CONTENTS
+================================================================================
+  1.  Architecture Overview
+  2.  SharePoint Setup
+  3.  Dataverse Table Schemas
+  4.  Dataverse Seed Data (Just Print Me)
+  5.  Power Automate Flows
+        5a.  SRA - Get Service List
+        5b.  SRA - Get Service Schema Text
+        5c.  SRA - Submit Request
+        5d.  SRA - Card Builder (Child Flow)
+        5e.  SRA - Mark Card Pending on ServiceField Change
+        5f.  SRA - Mark Cards Pending on Field Change
+        5g.  SRA - Nightly Card Rebuild
+  6.  Copilot Studio Topics
+        6a.  Conversational Start
+        6b.  Quick Chat
+        6c.  Form
+        6d.  Error Handling
+  7.  Development Order
+  8.  Appendix A: FieldType to Adaptive Card Element Mapping
+  9.  Appendix B: Section Display Name Reference
+
+================================================================================
+1. ARCHITECTURE OVERVIEW
+================================================================================
+
+CONCEPT
+-------
+A single agent handles 88 service request types. Service definitions, field
+schemas, and conditional rules all live in Dataverse. Adaptive cards for the
+Form path are pre-built and cached on the Service record, rebuilt automatically
+when definitions change. Quick Chat uses a Generative Answers loop grounded by
+a per-service schema document in SharePoint. Adding a new service requires only
+a data operation and a schema file upload — no topic changes.
+
+FLOW SUMMARY
+------------
+  User opens agent
+    └─ Conversational Start
+         ├─ PA: Get Service List → Service picker card
+         └─ Mode picker card (Quick Chat / Form)
+              ├─ Quick Chat Topic
+              │    ├─ Generative Answers loop (SharePoint schema knowledge)
+              │    ├─ Completion detection (JSON with "complete": true)
+              │    └─ PA: Submit Request → Dataverse
+              └─ Form Topic
+                   ├─ Read sbs_cardjson from sbs_Service record
+                   ├─ Render pre-built adaptive card
+                   └─ PA: Submit Request → Dataverse
+
+CARD LIFECYCLE
+--------------
+  sbs_ServiceField / sbs_Field row changed
+    └─ Trigger flow sets sbs_cardbuildstatus = "Pending"
+  
+  Nightly scheduled flow (e.g. 11 PM)
+    └─ Queries all Pending service records
+         └─ Calls SRA - Card Builder child flow per service
+              └─ Writes built card JSON back to sbs_Service
+                   └─ Sets status to Built or Failed
+
+  Override path:
+    If sbs_cardoverridejson is populated on sbs_Service,
+    Card Builder returns it directly without generating.
+
+GLOBAL VARIABLES (Copilot Studio)
+----------------------------------
+  Global.SelectedServiceId      Number   Dataverse service record ID
+  Global.SelectedServiceName    Text     Display name e.g. "Just Print Me"
+  Global.SelectedRequestType    Text     Payload key e.g. "JustPrintMe"
+  Global.SelectedMode           Text     "QuickChat" or "Form"
+
+================================================================================
+2. SHAREPOINT SETUP
+================================================================================
+
+Create a SharePoint document library named: Service Schemas
+
+For each service, upload a markdown (.md) file named by RequestType:
+  Example: JustPrintMe.md
+
+Content of each file should be the Output Schema Contract document for that
+service — field definitions, valid values, conditional rules, and payload
+schema. This is the knowledge source for the Quick Chat Generative Answers node.
+
+The Generative Answers node is configured at agent level to use this SharePoint
+library as a knowledge source. Dynamic instruction injection references
+Global.SelectedRequestType to focus the node on the correct service file.
+
+Naming convention is critical. The file name must exactly match the
+sbs_requesttype value in the sbs_Service Dataverse record.
+
+================================================================================
+3. DATAVERSE TABLE SCHEMAS
+================================================================================
+
+--------------------------------------------------------------------------------
+TABLE: sbs_Service
+--------------------------------------------------------------------------------
+Display Name: Service
+Description:  Registry of all available request services
+
+Columns:
+  sbs_serviceid          Autonumber     Primary key
+  sbs_name               Text(100)      Service display name
+  sbs_description        Text(500)      Short description shown in service picker
+  sbs_requesttype        Text(100)      JSON payload requestType value.
+                                        Must match SharePoint schema filename.
+  sbs_cardjson           Text(Max)      Pre-built adaptive card JSON for Form path.
+                                        Populated and maintained by Card Builder flow.
+  sbs_cardoverridejson   Text(Max)      If populated, Card Builder serves this
+                                        directly and skips generation. Use for
+                                        services requiring bespoke card layouts.
+  sbs_cardlastupdated    DateTime       Timestamp of last successful card build.
+  sbs_cardbuildstatus    Choice         Pending | Building | Built | Failed
+                                        Default: Pending
+
+--------------------------------------------------------------------------------
+TABLE: sbs_Field
+--------------------------------------------------------------------------------
+Display Name: Field
+Description:  Reusable field definitions shared across services
+
+Columns:
+  sbs_fieldid            Autonumber     Primary key
+  sbs_fieldname          Text(100)      JSON key name. Must match payload schema exactly.
+  sbs_displayname        Text(200)      Human-readable label shown in forms and chat
+  sbs_fieldtype          Choice         Text | Number | Boolean | DateTime | Choice | URL
+  sbs_validvalues        Text(2000)     JSON array of strings. Populated for Choice type only.
+                                        Example: ["BlackWhite","Colour"]
+  sbs_section            Text(100)      Payload section: root | charging | supply |
+                                        printSpecifications | return
+  sbs_helptext           Text(500)      Helper text shown below field in form card
+
+--------------------------------------------------------------------------------
+TABLE: sbs_ServiceField
+--------------------------------------------------------------------------------
+Display Name: Service Field
+Description:  Junction table. Maps fields to services with ordering and
+              conditional display rules.
+
+Columns:
+  sbs_servicefieldid       Autonumber       Primary key
+  sbs_serviceid            Lookup(Service)  Related service record
+  sbs_fieldid              Lookup(Field)    Related field definition
+  sbs_isrequired           Boolean          Base required flag.
+                                            Does not encode conditional requirements —
+                                            those are handled via sbs_isconditional.
+  sbs_displayorder         Integer          Render order. Use increments of 10
+                                            to allow future insertions without renumber.
+  sbs_isconditional        Boolean          True if this field only appears when a
+                                            parent field condition is met.
+  sbs_conditionalonfield   Text(100)        fieldname of the controlling field.
+                                            Stores string name, not lookup ID, so PA
+                                            can evaluate without a second query.
+  sbs_conditionalvalue     Text(200)        Value(s) that trigger display of this field.
+                                            Pipe-separated for OR conditions.
+                                            Example: "HandDelivered|InternalMail"
+
+================================================================================
+4. DATAVERSE SEED DATA — JUST PRINT ME
+================================================================================
+
+The following JSON represents the initial seed data for all three tables.
+Import via Power Automate, Dataverse Web API, or XrmToolBox Data Import.
+
+--- BEGIN JSON ---
+
+{
+  "tables": {
+    "sbs_Service": {
+      "displayName": "Service",
+      "description": "Registry of all available request services",
+      "columns": {
+        "sbs_serviceid": { "type": "autonumber", "isPrimaryKey": true },
+        "sbs_name": { "type": "text", "maxLength": 100, "required": true },
+        "sbs_description": { "type": "text", "maxLength": 500 },
+        "sbs_requesttype": { "type": "text", "maxLength": 100, "required": true },
+        "sbs_cardjson": { "type": "text", "maxLength": "max" },
+        "sbs_cardoverridejson": { "type": "text", "maxLength": "max" },
+        "sbs_cardlastupdated": { "type": "datetime" },
+        "sbs_cardbuildstatus": {
+          "type": "choice",
+          "options": ["Pending", "Building", "Built", "Failed"],
+          "default": "Pending"
+        }
+      }
+    },
+    "sbs_Field": {
+      "displayName": "Field",
+      "description": "Reusable field definitions shared across services",
+      "columns": {
+        "sbs_fieldid": { "type": "autonumber", "isPrimaryKey": true },
+        "sbs_fieldname": { "type": "text", "maxLength": 100, "required": true },
+        "sbs_displayname": { "type": "text", "maxLength": 200, "required": true },
+        "sbs_fieldtype": {
+          "type": "choice",
+          "required": true,
+          "options": ["Text", "Number", "Boolean", "DateTime", "Choice", "URL"]
+        },
+        "sbs_validvalues": { "type": "text", "maxLength": 2000 },
+        "sbs_section": { "type": "text", "maxLength": 100 },
+        "sbs_helptext": { "type": "text", "maxLength": 500 }
+      }
+    },
+    "sbs_ServiceField": {
+      "displayName": "Service Field",
+      "description": "Junction table mapping fields to services with display and conditional rules",
+      "columns": {
+        "sbs_servicefieldid": { "type": "autonumber", "isPrimaryKey": true },
+        "sbs_serviceid": { "type": "lookup", "relatedTable": "sbs_Service", "required": true },
+        "sbs_fieldid": { "type": "lookup", "relatedTable": "sbs_Field", "required": true },
+        "sbs_isrequired": { "type": "boolean", "default": false },
+        "sbs_displayorder": { "type": "integer", "required": true },
+        "sbs_isconditional": { "type": "boolean", "default": false },
+        "sbs_conditionalonfield": { "type": "text", "maxLength": 100 },
+        "sbs_conditionalvalue": { "type": "text", "maxLength": 200 }
+      }
+    }
+  },
+
+  "seed": {
+    "sbs_Service": [
+      {
+        "sbs_serviceid": 1,
+        "sbs_name": "Just Print Me",
+        "sbs_description": "Standard print request for documents supplied via SharePoint or iManage link. File upload is disabled — a source link must always be provided.",
+        "sbs_requesttype": "JustPrintMe",
+        "sbs_cardjson": null,
+        "sbs_cardoverridejson": null,
+        "sbs_cardlastupdated": null,
+        "sbs_cardbuildstatus": "Pending"
+      }
+    ],
+
+    "sbs_Field": [
+      {
+        "sbs_fieldid": 1,
+        "sbs_fieldname": "requestTitle",
+        "sbs_displayname": "Request Title",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "root",
+        "sbs_helptext": "A short descriptive title for this print request"
+      },
+      {
+        "sbs_fieldid": 2,
+        "sbs_fieldname": "chargeCostType",
+        "sbs_displayname": "Charge Cost Type",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"ClientMatter\",\"GLCode\",\"ClientMatterNotAvailable\"]",
+        "sbs_section": "charging",
+        "sbs_helptext": "How this print job will be charged"
+      },
+      {
+        "sbs_fieldid": 3,
+        "sbs_fieldname": "clientMatterNumber",
+        "sbs_displayname": "Client Matter Number",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "charging",
+        "sbs_helptext": "Required when charging to a client matter"
+      },
+      {
+        "sbs_fieldid": 4,
+        "sbs_fieldname": "thirdPartyConsent",
+        "sbs_displayname": "Third Party Consent",
+        "sbs_fieldtype": "Boolean",
+        "sbs_validvalues": null,
+        "sbs_section": "charging",
+        "sbs_helptext": "Confirm third party consent has been obtained for this matter"
+      },
+      {
+        "sbs_fieldid": 5,
+        "sbs_fieldname": "insiderListRequested",
+        "sbs_displayname": "Insider List Requested",
+        "sbs_fieldtype": "Boolean",
+        "sbs_validvalues": null,
+        "sbs_section": "charging",
+        "sbs_helptext": "Confirm whether an insider list has been requested for this matter"
+      },
+      {
+        "sbs_fieldid": 6,
+        "sbs_fieldname": "glCode",
+        "sbs_displayname": "GL Code",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "charging",
+        "sbs_helptext": "General ledger code — required when chargeCostType is GLCode"
+      },
+      {
+        "sbs_fieldid": 7,
+        "sbs_fieldname": "supplyMethod",
+        "sbs_displayname": "Supply Method",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"HandDelivered\",\"InternalMail\",\"LinkProvided\"]",
+        "sbs_section": "supply",
+        "sbs_helptext": "How the source document will be supplied"
+      },
+      {
+        "sbs_fieldid": 8,
+        "sbs_fieldname": "supplyOfficeLocation",
+        "sbs_displayname": "Supply Office Location",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "supply",
+        "sbs_helptext": "Required when supply method is HandDelivered or InternalMail"
+      },
+      {
+        "sbs_fieldid": 9,
+        "sbs_fieldname": "sourceLink",
+        "sbs_displayname": "Source Link",
+        "sbs_fieldtype": "URL",
+        "sbs_validvalues": null,
+        "sbs_section": "supply",
+        "sbs_helptext": "SharePoint or iManage link to the document. File upload is disabled — this is always required."
+      },
+      {
+        "sbs_fieldid": 10,
+        "sbs_fieldname": "numberOfCopies",
+        "sbs_displayname": "Number of Copies",
+        "sbs_fieldtype": "Number",
+        "sbs_validvalues": null,
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "How many copies to print"
+      },
+      {
+        "sbs_fieldid": 11,
+        "sbs_fieldname": "colourMode",
+        "sbs_displayname": "Colour Mode",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"BlackWhite\",\"Colour\"]",
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Print in black and white or colour"
+      },
+      {
+        "sbs_fieldid": 12,
+        "sbs_fieldname": "paperSize",
+        "sbs_displayname": "Paper Size",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Paper size required e.g. A4, A3"
+      },
+      {
+        "sbs_fieldid": 13,
+        "sbs_fieldname": "paginationRequired",
+        "sbs_displayname": "Pagination Required",
+        "sbs_fieldtype": "Boolean",
+        "sbs_validvalues": null,
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Does this document require pagination"
+      },
+      {
+        "sbs_fieldid": 14,
+        "sbs_fieldname": "paginationInstructions",
+        "sbs_displayname": "Pagination Instructions",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Required when paginationRequired is true — describe pagination requirements"
+      },
+      {
+        "sbs_fieldid": 15,
+        "sbs_fieldname": "finishingOption",
+        "sbs_displayname": "Finishing Option",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"StapleOnly\",\"None\"]",
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Finishing option from the organisation approved set. Update valid values to match full org set.",
+        "note": "ValidValues must be updated to match the full organisation FinishingOption set before go-live"
+      },
+      {
+        "sbs_fieldid": 16,
+        "sbs_fieldname": "staplePosition",
+        "sbs_displayname": "Staple Position",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"TopLeft\",\"TopRight\"]",
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Required when finishingOption is StapleOnly"
+      },
+      {
+        "sbs_fieldid": 17,
+        "sbs_fieldname": "returnMethod",
+        "sbs_displayname": "Return Method",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "return",
+        "sbs_helptext": "How the printed document should be returned. Saying 'Collection from [location]' counts as providing this value.",
+        "note": "Convert to Choice once returnMethod valid values are confirmed"
+      },
+      {
+        "sbs_fieldid": 18,
+        "sbs_fieldname": "returnLocationDetails",
+        "sbs_displayname": "Return Location Details",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "return",
+        "sbs_helptext": "Location details for return delivery",
+        "note": "ConditionalValue on returnMethod to be confirmed once returnMethod valid values are defined"
+      },
+      {
+        "sbs_fieldid": 19,
+        "sbs_fieldname": "returnDateTime",
+        "sbs_displayname": "Return Date and Time",
+        "sbs_fieldtype": "DateTime",
+        "sbs_validvalues": null,
+        "sbs_section": "return",
+        "sbs_helptext": "Must include both a date AND a time. A date alone e.g. Friday is not valid."
+      }
+    ],
+
+    "sbs_ServiceField": [
+      {
+        "sbs_servicefieldid": 1,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 1,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 10,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 2,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 2,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 20,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 3,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 3,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 30,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "chargeCostType",
+        "sbs_conditionalvalue": "ClientMatter"
+      },
+      {
+        "sbs_servicefieldid": 4,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 4,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 40,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "chargeCostType",
+        "sbs_conditionalvalue": "ClientMatter"
+      },
+      {
+        "sbs_servicefieldid": 5,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 5,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 50,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "chargeCostType",
+        "sbs_conditionalvalue": "ClientMatter"
+      },
+      {
+        "sbs_servicefieldid": 6,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 6,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 60,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "chargeCostType",
+        "sbs_conditionalvalue": "GLCode"
+      },
+      {
+        "sbs_servicefieldid": 7,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 7,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 70,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 8,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 8,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 80,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "supplyMethod",
+        "sbs_conditionalvalue": "HandDelivered|InternalMail"
+      },
+      {
+        "sbs_servicefieldid": 9,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 9,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 90,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 10,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 10,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 100,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 11,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 11,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 110,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 12,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 12,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 120,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 13,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 13,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 130,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 14,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 14,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 140,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "paginationRequired",
+        "sbs_conditionalvalue": "true"
+      },
+      {
+        "sbs_servicefieldid": 15,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 15,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 150,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 16,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 16,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 160,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "finishingOption",
+        "sbs_conditionalvalue": "StapleOnly"
+      },
+      {
+        "sbs_servicefieldid": 17,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 17,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 170,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 18,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 18,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 180,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "returnMethod",
+        "sbs_conditionalvalue": "Delivery",
+        "note": "ConditionalValue placeholder — update once returnMethod valid values are confirmed"
+      },
+      {
+        "sbs_servicefieldid": 19,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 19,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 190,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      }
+    ]
+  }
+}
+
+--- END JSON ---
+
+================================================================================
+5. POWER AUTOMATE FLOWS
+================================================================================
+
+--------------------------------------------------------------------------------
+5a. SRA - Get Service List
+--------------------------------------------------------------------------------
+Type:    Instant — called from Copilot Studio
+Purpose: Returns service list for the service picker adaptive card
+Inputs:  None
+Outputs: ServiceListJson (Text)
+
+Steps:
+
+  1. Trigger: When Copilot Studio calls this flow
+
+  2. List rows — sbs_Service
+       Select columns: sbs_serviceid, sbs_name, sbs_description, sbs_requesttype
+       Order by: sbs_name asc
+
+  3. Select (Data Operations)
+       From: List rows > value
+       Map:
+         value → item()?['sbs_serviceid']
+                 concatenated with pipe and requesttype and pipe and name
+                 Full value: concat(string(item()?['sbs_serviceid']),'|',
+                             item()?['sbs_requesttype'],'|',item()?['sbs_name'])
+         title → item()?['sbs_name']
+
+       Note: Encoding id|requestType|name as the card choice value avoids a
+       second flow call to resolve the service name and requestType after
+       the user makes their selection.
+
+  4. Compose
+       Input: output of Select
+
+  5. Return values to Copilot Studio
+       ServiceListJson: string(outputs('Compose'))
+
+--------------------------------------------------------------------------------
+5b. SRA - Get Service Schema Text
+--------------------------------------------------------------------------------
+Type:    Instant — called from Copilot Studio (Quick Chat topic only)
+Purpose: Returns a plain-text schema block for injection into Quick Chat
+         custom instructions as a fallback if SharePoint knowledge source
+         is unreliable. Optional — primary path uses SharePoint directly.
+Inputs:  ServiceId (Number)
+Outputs: SchemaText (Text)
+
+Steps:
+
+  1. Trigger: When Copilot Studio calls this flow
+       Input: ServiceId (Number)
+
+  2. List rows — sbs_ServiceField
+       Filter: _sbs_serviceid_value eq @{triggerBody()?['ServiceId']}
+       Expand: sbs_fieldid($select=sbs_fieldname,sbs_displayname,sbs_fieldtype,
+               sbs_validvalues,sbs_section,sbs_helptext)
+       Order by: sbs_displayorder asc
+
+  3. Apply to each row — build schema text block
+       Initialize variable SchemaLines (Array) before loop.
+       Inside loop, append a formatted string per field:
+
+       Field: [sbs_displayname] ([sbs_fieldname])
+       Type: [sbs_fieldtype]
+       Section: [sbs_section]
+       Required: [sbs_isrequired]
+       Valid Values: [sbs_validvalues if not null, else "Any"]
+       Conditional: [if sbs_isconditional: "Only required when " + conditionalonfield + " = " + conditionalvalue, else "Always shown"]
+       Help: [sbs_helptext]
+       ---
+
+  4. Join array to single string with newline separator
+
+  5. Return values to Copilot Studio
+       SchemaText: joined string
+
+--------------------------------------------------------------------------------
+5c. SRA - Submit Request
+--------------------------------------------------------------------------------
+Type:    Instant — called from Copilot Studio (both Quick Chat and Form)
+Purpose: Parses completed payload and writes request record to Dataverse
+Inputs:  ServiceId (Number), RequestType (Text), PayloadJson (Text)
+Outputs: RecordId (Text)
+
+Steps:
+
+  1. Trigger: When Copilot Studio calls this flow
+       Inputs: ServiceId (Number), RequestType (Text), PayloadJson (Text)
+
+  2. Compose — clean payload JSON
+       Input: triggerBody()?['PayloadJson']
+       Note: If Quick Chat payload contains "complete": true, strip it here.
+       Use replace() expression:
+         replace(triggerBody()?['PayloadJson'], '"complete": true,', '')
+         replace result with '"complete": true' (trailing) also removed.
+       Alternatively handle in Parse JSON schema by marking complete as optional.
+
+  3. Parse JSON
+       Content: output of Compose step
+       Schema: generate from a sample Just Print Me payload object.
+       Minimum schema shape:
+       {
+         "requestType": "",
+         "requestTitle": "",
+         "charging": {
+           "chargeCostType": "",
+           "clientMatterNumber": "",
+           "thirdPartyConsent": false,
+           "insiderListRequested": false,
+           "glCode": ""
+         },
+         "supply": {
+           "supplyMethod": "",
+           "supplyOfficeLocation": "",
+           "sourceLink": ""
+         },
+         "printSpecifications": {
+           "numberOfCopies": 0,
+           "colourMode": "",
+           "paperSize": "",
+           "paginationRequired": false,
+           "paginationInstructions": "",
+           "finishingOption": "",
+           "staplePosition": ""
+         },
+         "return": {
+           "returnMethod": "",
+           "returnLocationDetails": "",
+           "returnDateTime": ""
+         }
+       }
+
+  4. Create a new row — sbs_Request (or your target request table)
+       sbs_serviceid:      ServiceId input
+       sbs_requesttype:    RequestType input
+       sbs_payloadjson:    cleaned PayloadJson string
+       sbs_requesttitle:   body('Parse_JSON')?['requestTitle']
+       sbs_status:         "Submitted"
+       sbs_submittedon:    utcNow()
+       sbs_submittedby:    triggerOutputs()?['headers']?['x-ms-user-name']
+                           (populated if called from authenticated context)
+
+       Map individual parsed fields to discrete columns if your request
+       table has them. The sbs_payloadjson column stores the full JSON as
+       an auditable fallback regardless.
+
+  5. Return values to Copilot Studio
+       RecordId: string(outputs('Create_a_new_row')?['body/sbs_requestid'])
+
+--------------------------------------------------------------------------------
+5d. SRA - Card Builder (Child Flow)
+--------------------------------------------------------------------------------
+Type:    Instant — child flow called by SRA - Nightly Card Rebuild
+Purpose: Builds adaptive card JSON for a single service from its field
+         definitions. Writes result back to the sbs_Service record.
+Inputs:  ServiceId (Number)
+Outputs: CardJson (Text), Success (Boolean), ErrorMessage (Text)
+
+Steps:
+
+  1. Trigger: Manually trigger a flow (child flow trigger)
+       Input: ServiceId (Number)
+
+  2. Get row — sbs_Service
+       Row ID: ServiceId input
+
+  3. Condition — override check
+       If: sbs_cardoverridejson is not null AND is not empty
+         True branch:
+           Set variable CardJson = sbs_cardoverridejson
+           Go to step 14 (Return)
+         False branch:
+           Continue to step 4
+
+  4. List rows — sbs_ServiceField
+       Filter: _sbs_serviceid_value eq @{triggerBody()?['ServiceId']}
+       Expand: sbs_fieldid($select=sbs_fieldname,sbs_displayname,sbs_fieldtype,
+               sbs_validvalues,sbs_section,sbs_helptext)
+       Order by: sbs_displayorder asc
+
+  5. Initialize variable: CardBodyItems (Array) = []
+
+  6. Initialize variable: CurrentSection (String) = ""
+
+  7. Apply to each — iterate ServiceField rows
+
+       7a. Condition — new section
+             If: item()?['sbs_fieldid']?['sbs_section'] is not equal to CurrentSection
+             True branch:
+               Set CurrentSection = item()?['sbs_fieldid']?['sbs_section']
+               Append to CardBodyItems:
+               {
+                 "type": "TextBlock",
+                 "text": "[Section display name — see Appendix B]",
+                 "weight": "Bolder",
+                 "size": "Medium",
+                 "spacing": "Large",
+                 "separator": true
+               }
+               Note: Use a Switch on CurrentSection value to map to display
+               name. See Appendix B for section display names.
+
+       7b. Condition — field type routing
+             Switch on item()?['sbs_fieldid']?['sbs_fieldtype']
+
+             Case "Text":
+               Build element:
+               {
+                 "type": "Input.Text",
+                 "id": "[sbs_fieldname]",
+                 "label": "[sbs_displayname]",
+                 "placeholder": "[sbs_helptext]",
+                 "isRequired": [sbs_isrequired],
+                 "isVisible": [if sbs_isconditional then false else true],
+                 "errorMessage": "[sbs_displayname] is required"
+               }
+
+             Case "URL":
+               Build element:
+               {
+                 "type": "Input.Text",
+                 "id": "[sbs_fieldname]",
+                 "label": "[sbs_displayname]",
+                 "placeholder": "[sbs_helptext]",
+                 "style": "url",
+                 "isRequired": [sbs_isrequired],
+                 "isVisible": [if sbs_isconditional then false else true],
+                 "errorMessage": "Please enter a valid URL"
+               }
+
+             Case "Number":
+               Build element:
+               {
+                 "type": "Input.Number",
+                 "id": "[sbs_fieldname]",
+                 "label": "[sbs_displayname]",
+                 "placeholder": "[sbs_helptext]",
+                 "min": 1,
+                 "isRequired": [sbs_isrequired],
+                 "isVisible": [if sbs_isconditional then false else true],
+                 "errorMessage": "[sbs_displayname] is required"
+               }
+
+             Case "Boolean":
+               Build element:
+               {
+                 "type": "Input.Toggle",
+                 "id": "[sbs_fieldname]",
+                 "title": "[sbs_displayname]",
+                 "label": "[sbs_helptext]",
+                 "valueOn": "true",
+                 "valueOff": "false",
+                 "isVisible": [if sbs_isconditional then false else true]
+               }
+
+             Case "DateTime":
+               Append two elements — Date first, then Time:
+               {
+                 "type": "Input.Date",
+                 "id": "[sbs_fieldname]_date",
+                 "label": "[sbs_displayname] — Date",
+                 "isRequired": [sbs_isrequired],
+                 "isVisible": [if sbs_isconditional then false else true],
+                 "errorMessage": "Date is required"
+               },
+               {
+                 "type": "Input.Time",
+                 "id": "[sbs_fieldname]_time",
+                 "label": "[sbs_displayname] — Time",
+                 "isRequired": [sbs_isrequired],
+                 "isVisible": [if sbs_isconditional then false else true],
+                 "errorMessage": "Time is required — a date alone is not sufficient"
+               }
+               Note: The Submit flow must concatenate [fieldname]_date and
+               [fieldname]_time into a single ISO datetime before writing
+               to Dataverse.
+
+             Case "Choice":
+               Parse sbs_validvalues JSON array.
+               Map each value to: { "title": "[value]", "value": "[value]" }
+               Build element:
+               {
+                 "type": "Input.ChoiceSet",
+                 "id": "[sbs_fieldname]",
+                 "label": "[sbs_displayname]",
+                 "placeholder": "Select...",
+                 "style": "compact",
+                 "isRequired": [sbs_isrequired],
+                 "isVisible": [if sbs_isconditional then false else true],
+                 "choices": [mapped choices array],
+                 "errorMessage": "[sbs_displayname] is required"
+               }
+
+       7c. Append built element(s) to CardBodyItems
+
+  8. Compose — full adaptive card envelope
+       {
+         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+         "type": "AdaptiveCard",
+         "version": "1.3",
+         "body": [CardBodyItems variable],
+         "actions": [
+           {
+             "type": "Action.Submit",
+             "title": "Submit Request",
+             "style": "positive"
+           }
+         ]
+       }
+
+  9. Set variable: CardJson = string(outputs('Compose'))
+
+  10. Update row — sbs_Service
+        Row ID: ServiceId input
+        sbs_cardjson:          CardJson variable
+        sbs_cardlastupdated:   utcNow()
+        sbs_cardbuildstatus:   "Built"
+
+  11. Return values
+        CardJson:    CardJson variable
+        Success:     true
+        ErrorMessage: ""
+
+  Error handling (configure on the scope wrapping steps 4-10):
+    On failure:
+      Update row — sbs_Service
+        sbs_cardbuildstatus: "Failed"
+      Return values:
+        CardJson:     ""
+        Success:      false
+        ErrorMessage: error message string from failed action
+
+  NOTE ON CONDITIONAL VISIBILITY
+  Adaptive Cards 1.3 does not support native conditional show/hide based on
+  another field's value within the same card. Conditional fields are rendered
+  with isVisible: false by default. To enable dynamic show/hide you have two
+  options:
+
+  Option A — Multi-step cards (recommended for Copilot Studio)
+    Split the form into logical sections across multiple sequential cards.
+    Each card submission triggers the next card, with conditional cards
+    only rendered when their parent condition has been confirmed.
+    Implement this as multiple Question nodes in the Form topic rather than
+    a single card render.
+
+  Option B — Action.ToggleVisibility (Adaptive Cards 1.2+)
+    Add Action.ToggleVisibility actions to Choice inputs so selecting a value
+    reveals hidden fields. Requires card-level action bindings and is more
+    complex to generate dynamically. Test host support in Copilot Studio
+    before committing to this approach.
+
+  The card builder generates isVisible: false on conditional fields in all
+  cases. Which visibility behaviour is applied is determined by the Form
+  topic implementation, not the card builder.
+
+--------------------------------------------------------------------------------
+5e. SRA - Mark Card Pending on ServiceField Change
+--------------------------------------------------------------------------------
+Type:    Automated — Dataverse row trigger
+Purpose: Marks a service card as Pending rebuild when any of its field
+         mappings are created, updated, or deleted.
+Trigger: When a row is added, modified, or deleted — sbs_ServiceField table
+
+Steps:
+
+  1. Trigger: When a row is added, modified, or deleted
+       Table: sbs_ServiceField
+       Scope: Organisation
+
+  2. Get row — sbs_ServiceField
+       Row ID: triggerOutputs()?['body/sbs_servicefieldid']
+       Note: Needed to resolve the ServiceId lookup value.
+
+  3. Update row — sbs_Service
+       Row ID: outputs('Get_row')?['body/_sbs_serviceid_value']
+       sbs_cardbuildstatus: "Pending"
+
+  Note: This flow fires on every ServiceField change during business hours.
+  The card is NOT rebuilt immediately — the status is simply flagged. The
+  nightly flow handles the actual rebuild. This keeps the trigger flow fast
+  and avoids rebuilding cards multiple times if several fields are updated
+  in quick succession.
+
+--------------------------------------------------------------------------------
+5f. SRA - Mark Cards Pending on Field Change
+--------------------------------------------------------------------------------
+Type:    Automated — Dataverse row trigger
+Purpose: When a shared field definition changes (e.g. valid values updated),
+         marks all services using that field as Pending rebuild.
+Trigger: When a row is modified — sbs_Field table
+
+Steps:
+
+  1. Trigger: When a row is modified
+       Table: sbs_Field
+       Scope: Organisation
+
+  2. List rows — sbs_ServiceField
+       Filter: _sbs_fieldid_value eq @{triggerOutputs()?['body/sbs_fieldid']}
+       Select columns: sbs_servicefieldid, _sbs_serviceid_value
+
+  3. Apply to each — iterate ServiceField rows
+       Update row — sbs_Service
+         Row ID: item()?['_sbs_serviceid_value']
+         sbs_cardbuildstatus: "Pending"
+
+  Note: A single field change could affect many services. This flow will fire
+  one Update row action per affected service. For 88 services sharing a common
+  field, that is 88 updates — acceptable, but be aware of Power Automate API
+  call consumption.
+
+  Optimisation if needed: Select distinct ServiceIds first, deduplicate
+  using a union or group-by step, then update only unique records.
+
+--------------------------------------------------------------------------------
+5g. SRA - Nightly Card Rebuild
+--------------------------------------------------------------------------------
+Type:    Scheduled
+Purpose: Rebuilds adaptive card JSON for all services marked as Pending.
+         Runs out of hours to avoid impacting agent performance during the day.
+Trigger: Recurrence — daily at 23:00 (adjust to suit your maintenance window)
+
+Steps:
+
+  1. Trigger: Recurrence
+       Interval: 1
+       Frequency: Day
+       At: 23:00 local time (configure timezone explicitly)
+
+  2. List rows — sbs_Service
+       Filter: sbs_cardbuildstatus eq 'Pending'
+       Select columns: sbs_serviceid, sbs_name, sbs_requesttype
+
+  3. Condition — any pending services?
+       If: length(outputs('List_rows')?['body/value']) is greater than 0
+       True branch: continue to step 4
+       False branch: terminate (nothing to do)
+
+  4. Apply to each — iterate Pending service records
+       Concurrency: set to 1 to avoid rate limiting on Dataverse writes.
+       Increase to 5 if rebuild volume grows and rate limits allow.
+
+       4a. Update row — sbs_Service
+             Row ID: item()?['sbs_serviceid']
+             sbs_cardbuildstatus: "Building"
+           Note: Mark as Building before calling child flow so a second
+           nightly run does not pick up the same record if the flow is slow.
+
+       4b. Run child flow — SRA - Card Builder
+             ServiceId: item()?['sbs_serviceid']
+
+       4c. Condition — Success check
+             If: outputs('Run_child_flow')?['body/Success'] is equal to true
+             True branch:
+               No further action needed — Card Builder already updated the
+               sbs_Service record with Built status and card JSON.
+             False branch:
+               Update row — sbs_Service
+                 sbs_cardbuildstatus: "Failed"
+               Post adaptive card to Teams channel (optional monitoring):
+                 Alert: "Card build failed for service [name]: [ErrorMessage]"
+
+  5. (Optional) Send summary notification
+       After Apply to each completes, compose a summary of Built vs Failed
+       counts and post to a monitoring Teams channel or send via email.
+
+================================================================================
+6. COPILOT STUDIO TOPICS
+================================================================================
+
+--------------------------------------------------------------------------------
+6a. Topic: Conversational Start (System Topic — modify existing)
+--------------------------------------------------------------------------------
+Trigger: System - Conversation Start
+Purpose: Service picker, mode picker, route to Quick Chat or Form.
+
+Node 1 — Send Message
+  Text: "Welcome to the Service Request Agent. Loading available services..."
+
+Node 2 — Call Power Automate
+  Flow: SRA - Get Service List
+  Output: Topic.ServiceListJson (Text)
+
+Node 3 — Ask with Adaptive Card (Service Picker)
+  Card JSON:
+  {
+    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+    "type": "AdaptiveCard",
+    "version": "1.3",
+    "body": [
+      {
+        "type": "TextBlock",
+        "text": "What service do you need today?",
+        "weight": "Bolder",
+        "size": "Medium"
+      },
+      {
+        "type": "Input.ChoiceSet",
+        "id": "selectedService",
+        "style": "filtered",
+        "placeholder": "Search or select a service...",
+        "isRequired": true,
+        "choices": []
+      }
+    ],
+    "actions": [
+      { "type": "Action.Submit", "title": "Continue", "style": "positive" }
+    ]
+  }
+
+  Bind the choices array to Topic.ServiceListJson at runtime.
+  Each choice item has: title = service name, value = "id|requestType|name"
+  Wait for response: Yes
+  Output variable: Topic.ServicePickerResponse
+
+Node 4 — Set Global Variables (parse delimited card response)
+  Set Global.SelectedServiceId:
+    Power Fx: Value(First(Split(Topic.ServicePickerResponse.selectedService, "|")).Value)
+  
+  Set Global.SelectedRequestType:
+    Power Fx: Index(Split(Topic.ServicePickerResponse.selectedService, "|"), 2).Value
+  
+  Set Global.SelectedServiceName:
+    Power Fx: Last(Split(Topic.ServicePickerResponse.selectedService, "|")).Value
+
+Node 5 — Ask with Adaptive Card (Mode Picker)
+  Card JSON:
+  {
+    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+    "type": "AdaptiveCard",
+    "version": "1.3",
+    "body": [
+      {
+        "type": "TextBlock",
+        "text": "How would you like to complete your request?",
+        "weight": "Bolder",
+        "size": "Medium"
+      },
+      {
+        "type": "Input.ChoiceSet",
+        "id": "selectedMode",
+        "style": "expanded",
+        "isRequired": true,
+        "choices": [
+          {
+            "title": "Quick Chat — answer a few questions conversationally",
+            "value": "QuickChat"
+          },
+          {
+            "title": "Form — fill in a structured form",
+            "value": "Form"
+          }
+        ]
+      }
+    ],
+    "actions": [
+      { "type": "Action.Submit", "title": "Continue", "style": "positive" }
+    ]
+  }
+
+  Wait for response: Yes
+  Output variable: Topic.ModeResponse
+
+Node 6 — Set Variable
+  Global.SelectedMode = Topic.ModeResponse.selectedMode
+
+Node 7 — Condition
+  If: Global.SelectedMode is equal to "QuickChat"
+    → Node 8a
+  Else:
+    → Node 8b
+
+Node 8a — Redirect to Topic: Quick Chat
+Node 8b — Redirect to Topic: Form
+
+--------------------------------------------------------------------------------
+6b. Topic: Quick Chat
+--------------------------------------------------------------------------------
+Trigger: Called via Redirect only. No trigger phrases.
+Purpose: Generative Answers loop, completion detection, Dataverse submit.
+
+Knowledge Source (agent level):
+  SharePoint library: Service Schemas
+  The Generative Answers node uses this library.
+  File targeting is controlled via the dynamic custom instructions.
+
+Node 1 — Set Variable
+  Topic.ConversationHistory = "" (Text, empty)
+
+Node 2 — Set Variable
+  Topic.IsComplete = false (Boolean)
+
+Node 3 — Set Variable
+  Topic.LastResponse = "" (Text, empty)
+
+Node 4 — Send Message
+  "Let's get your {Global.SelectedServiceName} request sorted.
+   Tell me what you need and I'll take care of the rest."
+
+--- LOOP START — label this node "ConversationLoop" ---
+
+Node 5 — Question
+  Question: "" (blank — question is surfaced from GA output in Node 11)
+  Note: First turn uses the user's reply to Node 4's message.
+  For subsequent turns the user responds to the GA question sent in Node 11.
+  Entity: Free text (No entity)
+  Variable: Topic.UserInput (Text)
+
+Node 6 — Set Variable (append user turn to history)
+  Topic.ConversationHistory =
+    Topic.ConversationHistory & "User: " & Topic.UserInput & Char(10)
+
+Node 7 — Generative Answers Node
+  Input (context / search query): Topic.ConversationHistory
+
+  Custom Instructions:
+  -----------------------------------------------------------------------
+  You are a service request assistant for the {Global.SelectedRequestType}
+  service. Your knowledge source contains the schema document for this
+  service. It defines every required field, field types, valid values, and
+  all conditional rules.
+
+  Review the full conversation history provided. Identify every field that
+  has already been confirmed by the user. Do not ask again for a field that
+  has been answered.
+
+  Ask for missing required fields one or two at a time in a natural,
+  friendly way. Apply all conditional rules — only ask for a conditional
+  field when its parent condition is satisfied.
+
+  When every required field has been collected and confirmed, respond with
+  only a valid JSON object matching the payload schema in the knowledge
+  document. Include all collected values and add "complete": true as a
+  top-level property. Do not include any text before or after the JSON.
+
+  Until all fields are collected, respond conversationally only. Never
+  output any JSON until the request is genuinely complete.
+
+  Never infer or assume a value. If a user provides a vague answer, ask
+  for clarification before accepting it.
+  -----------------------------------------------------------------------
+
+  Knowledge source: SharePoint — Service Schemas library
+  Output variable: Topic.LastResponse (Text)
+
+Node 7b — Condition (empty output guard)
+  If: Topic.LastResponse is blank or empty
+    True branch:
+      Send Message: "I had trouble processing that. Could you rephrase?"
+      Go to step: ConversationLoop (Node 5)
+    False branch:
+      Continue to Node 8
+
+Node 8 — Set Variable (append assistant turn to history)
+  Topic.ConversationHistory =
+    Topic.ConversationHistory & "Assistant: " & Topic.LastResponse & Char(10)
+
+Node 9 — Condition (completion check)
+  If: Contains(Topic.LastResponse, """complete"": true")
+       OR Contains(Topic.LastResponse, "\"complete\": true")
+    True branch → Node 10
+    False branch → Node 11
+
+--- FALSE BRANCH: Not complete ---
+
+Node 11 — Send Message
+  Text: {Topic.LastResponse}
+  (Surfaces the GA question or follow-up to the user)
+
+Node 12 — Go to step: ConversationLoop (Node 5)
+
+--- TRUE BRANCH: Complete ---
+
+Node 10 — Set Variable
+  Topic.PayloadJson = Topic.LastResponse
+  (Raw JSON string with complete: true — the Submit flow strips the flag)
+
+Node 13 — Call Power Automate
+  Flow: SRA - Submit Request
+  Inputs:
+    ServiceId:    Global.SelectedServiceId
+    RequestType:  Global.SelectedRequestType
+    PayloadJson:  Topic.PayloadJson
+  Output: Topic.RecordId (Text)
+
+Node 14 — Send Message
+  "Your {Global.SelectedServiceName} request has been submitted.
+   Reference number: {Topic.RecordId}.
+   The team will action this shortly."
+
+Node 15 — End topic
+
+--------------------------------------------------------------------------------
+6c. Topic: Form
+--------------------------------------------------------------------------------
+Trigger: Called via Redirect only. No trigger phrases.
+Purpose: Read pre-built card from sbs_Service, render, capture submission,
+         write to Dataverse.
+
+Node 1 — Send Message
+  "Loading your {Global.SelectedServiceName} form..."
+
+Node 2 — Get row — sbs_Service (via Dataverse connector action)
+  Row ID: Global.SelectedServiceId
+  Output variable: Topic.ServiceRecord
+
+  Alternative: Call a lightweight PA flow that returns just the cardjson
+  string if the direct Dataverse action is not available in your topic editor.
+
+Node 3 — Set Variable
+  Topic.CardJson = Topic.ServiceRecord.sbs_cardjson
+
+Node 4 — Condition (card available check)
+  If: Topic.CardJson is blank or empty
+    True branch → Node 4a (fallback)
+    False branch → Node 5
+
+Node 4a — Send Message (fallback)
+  "The form for {Global.SelectedServiceName} is not available yet —
+   the team is setting it up. Please use Quick Chat or contact support."
+  End topic.
+
+Node 5 — Ask with Adaptive Card
+  Card: Topic.CardJson (variable reference)
+  
+  Note: Test whether your Copilot Studio version supports rendering a card
+  from a variable. If not, use a PA flow that returns the card JSON and
+  immediately renders it via a Send Message with card attachment type,
+  or fall back to static card JSON per service using a Switch on
+  Global.SelectedRequestType.
+
+  Wait for response: Yes
+  Output variable: Topic.FormResponse
+
+Node 6 — Set Variable
+  Topic.PayloadJson = JSON(Topic.FormResponse)
+  
+  Note: Prepend requestType and requestTitle to the payload before
+  submitting if they are not captured inside the card response.
+
+Node 7 — Call Power Automate
+  Flow: SRA - Submit Request
+  Inputs:
+    ServiceId:    Global.SelectedServiceId
+    RequestType:  Global.SelectedRequestType
+    PayloadJson:  Topic.PayloadJson
+  Output: Topic.RecordId (Text)
+
+Node 8 — Send Message
+  "Your {Global.SelectedServiceName} request has been submitted.
+   Reference: {Topic.RecordId}."
+
+Node 9 — End topic
+
+FORM TOPIC — OPEN ITEMS TO RESOLVE BEFORE BUILD
+  1. Conditional field visibility: decide between multi-step card sequence
+     (Option A) or Action.ToggleVisibility (Option B). See Card Builder note
+     in section 5d. Resolve before card builder is built.
+  2. Dynamic card JSON from variable: test this in your Copilot Studio
+     version before committing to this approach. It is unreliable in some
+     versions. If it fails, the fallback is described in Node 5 above.
+  3. DateTime field handling: the card builder produces separate _date and
+     _time input IDs. The Submit flow must concatenate these. Ensure the
+     Submit flow handles this before end-to-end testing.
+
+--------------------------------------------------------------------------------
+6d. Error Handling — Conversational Boosting Override
+--------------------------------------------------------------------------------
+Navigate to: System Topics > Conversational Boosting
+
+Locate the fallback error message node (sends "Sorry, I wasn't able to
+respond to that" or similar). Add a condition before it:
+
+Condition:
+  If: Global.SelectedMode is equal to "QuickChat"
+  True branch:
+    Send Message: "I had a problem with that response — let's try again."
+    Redirect to: Quick Chat topic
+    Note: Redirecting mid-loop will reset conversation history. This is
+    acceptable as a rare fallback. The user will need to restart the
+    Quick Chat flow for that service.
+  False branch:
+    Existing fallback behaviour (leave unchanged)
+
+A simpler and more reliable approach is the empty output guard already
+built into Quick Chat at Node 7b, which catches most Generative Answers
+failures before they surface as system errors. The Conversational Boosting
+override is a secondary safety net.
+
+================================================================================
+7. DEVELOPMENT ORDER
+================================================================================
+
+Build and test in this exact sequence. Each step validates the layer below
+it before building on top.
+
+  Step 1  — Create Dataverse tables from schema in Section 3
+  Step 2  — Import seed data from Section 4
+  Step 3  — Upload JustPrintMe.md to SharePoint Service Schemas library
+  Step 4  — Build and test SRA - Get Service List (verify JSON output shape)
+  Step 5  — Build Conversational Start: service picker card only
+              Confirm card renders, choice selection works, global variables
+              are set correctly from the delimited value
+  Step 6  — Add mode picker to Conversational Start, confirm routing variables
+  Step 7  — Build SRA - Submit Request with stubbed output (log inputs only)
+  Step 8  — Build Quick Chat topic
+              Test Generative Answers node with SharePoint knowledge source
+              independently before adding the loop logic
+              Then add loop, completion detection, and stub submit call
+              Then connect real Submit flow
+  Step 9  — Build SRA - Card Builder child flow
+              Test standalone with Just Print Me service ID
+              Inspect generated card JSON before wiring into any topic
+  Step 10 — Build SRA - Mark Card Pending on ServiceField Change
+  Step 11 — Build SRA - Mark Cards Pending on Field Change
+  Step 12 — Build SRA - Nightly Card Rebuild
+              Test by manually setting a service to Pending and running
+              the flow on demand before setting up the schedule
+  Step 13 — Build Form topic
+              Test dynamic card rendering first
+              Then connect Submit flow
+  Step 14 — Add Conversational Boosting override
+  Step 15 — End-to-end test: Quick Chat, Just Print Me, full submission
+  Step 16 — End-to-end test: Form, Just Print Me, full submission
+  Step 17 — Validate card rebuild cycle: modify a ServiceField row, confirm
+              Pending status set, run nightly flow manually, confirm Built
+
+================================================================================
+8. APPENDIX A — FIELDTYPE TO ADAPTIVE CARD ELEMENT MAPPING
+================================================================================
+
+  FieldType   Card Element          Notes
+  ---------   ------------          -----
+  Text        Input.Text            style: "text"
+  URL         Input.Text            style: "url"
+  Number      Input.Number          min: 1 for most cases
+  Boolean     Input.Toggle          valueOn: "true", valueOff: "false"
+  DateTime    Input.Date +          Two separate inputs per field.
+              Input.Time            IDs: [fieldname]_date, [fieldname]_time
+                                    Submit flow concatenates to ISO datetime.
+  Choice      Input.ChoiceSet       style: "compact" for 4+ options,
+                                    style: "expanded" for 2-3 options.
+                                    Choices mapped from sbs_validvalues array.
+
+================================================================================
+9. APPENDIX B — SECTION DISPLAY NAME REFERENCE
+================================================================================
+
+  sbs_section value    Display name in card
+  -----------------    --------------------
+  root                 Request Details
+  charging             Charging
+  supply               Document Supply
+  printSpecifications  Print Specifications
+  return               Return
+
+  Use these mappings in the Card Builder Switch step (7a) when generating
+  section header TextBlock elements.
+
+================================================================================
+END OF GUIDE
+================================================================================
