@@ -1,0 +1,480 @@
+================================================================================
+SERVICE REQUEST AGENT â€” COMPLETE BUILD GUIDE
+================================================================================
+Version: 1.0
+Scope:   Just Print Me (Phase 1)
+Stack:   Copilot Studio (Generative Orchestration), Power Automate,
+         Dataverse, SharePoint, Adaptive Cards
+
+================================================================================
+CONTENTS
+================================================================================
+  1.  Architecture Overview
+  2.  SharePoint Setup
+  3.  Dataverse Table Schemas
+  4.  Dataverse Seed Data (Just Print Me)
+  5.  Power Automate Flows
+        5a.  SRA - Get Service List
+        5b.  SRA - Get Service Schema Text
+        5c.  SRA - Submit Request
+        5d.  SRA - Card Builder (Child Flow)
+        5e.  SRA - Mark Card Pending on ServiceField Change
+        5f.  SRA - Mark Cards Pending on Field Change
+        5g.  SRA - Nightly Card Rebuild
+  6.  Copilot Studio Topics
+        6a.  Conversational Start
+        6b.  Quick Chat
+        6c.  Form
+        6d.  Error Handling
+  7.  Development Order
+  8.  Appendix A: FieldType to Adaptive Card Element Mapping
+  9.  Appendix B: Section Display Name Reference
+
+================================================================================
+1. ARCHITECTURE OVERVIEW
+================================================================================
+
+CONCEPT
+-------
+A single agent handles 88 service request types. Service definitions, field
+schemas, and conditional rules all live in Dataverse. Adaptive cards for the
+Form path are pre-built and cached on the Service record, rebuilt automatically
+when definitions change. Quick Chat uses a Generative Answers loop grounded by
+a per-service schema document in SharePoint. Adding a new service requires only
+a data operation and a schema file upload â€” no topic changes.
+
+FLOW SUMMARY
+------------
+  User opens agent
+    â””â”€ Conversational Start
+         â”œâ”€ PA: Get Service List â†’ Service picker card
+         â””â”€ Mode picker card (Quick Chat / Form)
+              â”œâ”€ Quick Chat Topic
+              â”‚    â”œâ”€ Generative Answers loop (SharePoint schema knowledge)
+              â”‚    â”œâ”€ Completion detection (JSON with "complete": true)
+              â”‚    â””â”€ PA: Submit Request â†’ Dataverse
+              â””â”€ Form Topic
+                   â”œâ”€ Read sbs_cardjson from sbs_Service record
+                   â”œâ”€ Render pre-built adaptive card
+                   â””â”€ PA: Submit Request â†’ Dataverse
+
+CARD LIFECYCLE
+--------------
+  sbs_ServiceField / sbs_Field row changed
+    â””â”€ Trigger flow sets sbs_cardbuildstatus = "Pending"
+  
+  Nightly scheduled flow (e.g. 11 PM)
+    â””â”€ Queries all Pending service records
+         â””â”€ Calls SRA - Card Builder child flow per service
+              â””â”€ Writes built card JSON back to sbs_Service
+                   â””â”€ Sets status to Built or Failed
+
+  Override path:
+    If sbs_cardoverridejson is populated on sbs_Service,
+    Card Builder returns it directly without generating.
+
+GLOBAL VARIABLES (Copilot Studio)
+----------------------------------
+  Global.SelectedServiceId      Number   Dataverse service record ID
+  Global.SelectedServiceName    Text     Display name e.g. "Just Print Me"
+  Global.SelectedRequestType    Text     Payload key e.g. "JustPrintMe"
+  Global.SelectedMode           Text     "QuickChat" or "Form"
+
+================================================================================
+2. SHAREPOINT SETUP
+================================================================================
+
+Create a SharePoint document library named: Service Schemas
+
+For each service, upload a markdown (.md) file named by RequestType:
+  Example: JustPrintMe.md
+
+Content of each file should be the Output Schema Contract document for that
+service â€” field definitions, valid values, conditional rules, and payload
+schema. This is the knowledge source for the Quick Chat Generative Answers node.
+
+The Generative Answers node is configured at agent level to use this SharePoint
+library as a knowledge source. Dynamic instruction injection references
+Global.SelectedRequestType to focus the node on the correct service file.
+
+Naming convention is critical. The file name must exactly match the
+sbs_requesttype value in the sbs_Service Dataverse record.
+
+================================================================================
+3. DATAVERSE TABLE SCHEMAS
+================================================================================
+
+--------------------------------------------------------------------------------
+TABLE: sbs_Service
+--------------------------------------------------------------------------------
+Display Name: Service
+Description:  Registry of all available request services
+
+Columns:
+  sbs_serviceid          Autonumber     Primary key
+  sbs_name               Text(100)      Service display name
+  sbs_description        Text(500)      Short description shown in service picker
+  sbs_requesttype        Text(100)      JSON payload requestType value.
+                                        Must match SharePoint schema filename.
+  sbs_cardjson           Text(Max)      Pre-built adaptive card JSON for Form path.
+                                        Populated and maintained by Card Builder flow.
+  sbs_cardoverridejson   Text(Max)      If populated, Card Builder serves this
+                                        directly and skips generation. Use for
+                                        services requiring bespoke card layouts.
+  sbs_cardlastupdated    DateTime       Timestamp of last successful card build.
+  sbs_cardbuildstatus    Choice         Pending | Building | Built | Failed
+                                        Default: Pending
+
+--------------------------------------------------------------------------------
+TABLE: sbs_Field
+--------------------------------------------------------------------------------
+Display Name: Field
+Description:  Reusable field definitions shared across services
+
+Columns:
+  sbs_fieldid            Autonumber     Primary key
+  sbs_fieldname          Text(100)      JSON key name. Must match payload schema exactly.
+  sbs_displayname        Text(200)      Human-readable label shown in forms and chat
+  sbs_fieldtype          Choice         Text | Number | Boolean | DateTime | Choice | URL
+  sbs_validvalues        Text(2000)     JSON array of strings. Populated for Choice type only.
+                                        Example: ["BlackWhite","Colour"]
+  sbs_section            Text(100)      Payload section: root | charging | supply |
+                                        printSpecifications | return
+  sbs_helptext           Text(500)      Helper text shown below field in form card
+
+--------------------------------------------------------------------------------
+TABLE: sbs_ServiceField
+--------------------------------------------------------------------------------
+Display Name: Service Field
+Description:  Junction table. Maps fields to services with ordering and
+              conditional display rules.
+
+Columns:
+  sbs_servicefieldid       Autonumber       Primary key
+  sbs_serviceid            Lookup(Service)  Related service record
+  sbs_fieldid              Lookup(Field)    Related field definition
+  sbs_isrequired           Boolean          Base required flag.
+                                            Does not encode conditional requirements â€”
+                                            those are handled via sbs_isconditional.
+  sbs_displayorder         Integer          Render order. Use increments of 10
+                                            to allow future insertions without renumber.
+  sbs_isconditional        Boolean          True if this field only appears when a
+                                            parent field condition is met.
+  sbs_conditionalonfield   Text(100)        fieldname of the controlling field.
+                                            Stores string name, not lookup ID, so PA
+                                            can evaluate without a second query.
+  sbs_conditionalvalue     Text(200)        Value(s) that trigger display of this field.
+                                            Pipe-separated for OR conditions.
+                                            Example: "HandDelivered|InternalMail"
+
+================================================================================
+4. DATAVERSE SEED DATA â€” JUST PRINT ME
+================================================================================
+
+The following JSON represents the initial seed data for all three tables.
+Import via Power Automate, Dataverse Web API, or XrmToolBox Data Import.
+
+--- BEGIN JSON ---
+
+{
+  "tables": {
+    "sbs_Service": {
+      "displayName": "Service",
+      "description": "Registry of all available request services",
+      "columns": {
+        "sbs_serviceid": { "type": "autonumber", "isPrimaryKey": true },
+        "sbs_name": { "type": "text", "maxLength": 100, "required": true },
+        "sbs_description": { "type": "text", "maxLength": 500 },
+        "sbs_requesttype": { "type": "text", "maxLength": 100, "required": true },
+        "sbs_cardjson": { "type": "text", "maxLength": "max" },
+        "sbs_cardoverridejson": { "type": "text", "maxLength": "max" },
+        "sbs_cardlastupdated": { "type": "datetime" },
+        "sbs_cardbuildstatus": {
+          "type": "choice",
+          "options": ["Pending", "Building", "Built", "Failed"],
+          "default": "Pending"
+        }
+      }
+    },
+    "sbs_Field": {
+      "displayName": "Field",
+      "description": "Reusable field definitions shared across services",
+      "columns": {
+        "sbs_fieldid": { "type": "autonumber", "isPrimaryKey": true },
+        "sbs_fieldname": { "type": "text", "maxLength": 100, "required": true },
+        "sbs_displayname": { "type": "text", "maxLength": 200, "required": true },
+        "sbs_fieldtype": {
+          "type": "choice",
+          "required": true,
+          "options": ["Text", "Number", "Boolean", "DateTime", "Choice", "URL"]
+        },
+        "sbs_validvalues": { "type": "text", "maxLength": 2000 },
+        "sbs_section": { "type": "text", "maxLength": 100 },
+        "sbs_helptext": { "type": "text", "maxLength": 500 }
+      }
+    },
+    "sbs_ServiceField": {
+      "displayName": "Service Field",
+      "description": "Junction table mapping fields to services with display and conditional rules",
+      "columns": {
+        "sbs_servicefieldid": { "type": "autonumber", "isPrimaryKey": true },
+        "sbs_serviceid": { "type": "lookup", "relatedTable": "sbs_Service", "required": true },
+        "sbs_fieldid": { "type": "lookup", "relatedTable": "sbs_Field", "required": true },
+        "sbs_isrequired": { "type": "boolean", "default": false },
+        "sbs_displayorder": { "type": "integer", "required": true },
+        "sbs_isconditional": { "type": "boolean", "default": false },
+        "sbs_conditionalonfield": { "type": "text", "maxLength": 100 },
+        "sbs_conditionalvalue": { "type": "text", "maxLength": 200 }
+      }
+    }
+  },
+
+  "seed": {
+    "sbs_Service": [
+      {
+        "sbs_serviceid": 1,
+        "sbs_name": "Just Print Me",
+        "sbs_description": "Standard print request for documents supplied via SharePoint or iManage link. File upload is disabled â€” a source link must always be provided.",
+        "sbs_requesttype": "JustPrintMe",
+        "sbs_cardjson": null,
+        "sbs_cardoverridejson": null,
+        "sbs_cardlastupdated": null,
+        "sbs_cardbuildstatus": "Pending"
+      }
+    ],
+
+    "sbs_Field": [
+      {
+        "sbs_fieldid": 1,
+        "sbs_fieldname": "requestTitle",
+        "sbs_displayname": "Request Title",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "root",
+        "sbs_helptext": "A short descriptive title for this print request"
+      },
+      {
+        "sbs_fieldid": 2,
+        "sbs_fieldname": "chargeCostType",
+        "sbs_displayname": "Charge Cost Type",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"ClientMatter\",\"GLCode\",\"ClientMatterNotAvailable\"]",
+        "sbs_section": "charging",
+        "sbs_helptext": "How this print job will be charged"
+      },
+      {
+        "sbs_fieldid": 3,
+        "sbs_fieldname": "clientMatterNumber",
+        "sbs_displayname": "Client Matter Number",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "charging",
+        "sbs_helptext": "Required when charging to a client matter"
+      },
+      {
+        "sbs_fieldid": 4,
+        "sbs_fieldname": "thirdPartyConsent",
+        "sbs_displayname": "Third Party Consent",
+        "sbs_fieldtype": "Boolean",
+        "sbs_validvalues": null,
+        "sbs_section": "charging",
+        "sbs_helptext": "Confirm third party consent has been obtained for this matter"
+      },
+      {
+        "sbs_fieldid": 5,
+        "sbs_fieldname": "insiderListRequested",
+        "sbs_displayname": "Insider List Requested",
+        "sbs_fieldtype": "Boolean",
+        "sbs_validvalues": null,
+        "sbs_section": "charging",
+        "sbs_helptext": "Confirm whether an insider list has been requested for this matter"
+      },
+      {
+        "sbs_fieldid": 6,
+        "sbs_fieldname": "glCode",
+        "sbs_displayname": "GL Code",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "charging",
+        "sbs_helptext": "General ledger code â€” required when chargeCostType is GLCode"
+      },
+      {
+        "sbs_fieldid": 7,
+        "sbs_fieldname": "supplyMethod",
+        "sbs_displayname": "Supply Method",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"HandDelivered\",\"InternalMail\",\"LinkProvided\"]",
+        "sbs_section": "supply",
+        "sbs_helptext": "How the source document will be supplied"
+      },
+      {
+        "sbs_fieldid": 8,
+        "sbs_fieldname": "supplyOfficeLocation",
+        "sbs_displayname": "Supply Office Location",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "supply",
+        "sbs_helptext": "Required when supply method is HandDelivered or InternalMail"
+      },
+      {
+        "sbs_fieldid": 9,
+        "sbs_fieldname": "sourceLink",
+        "sbs_displayname": "Source Link",
+        "sbs_fieldtype": "URL",
+        "sbs_validvalues": null,
+        "sbs_section": "supply",
+        "sbs_helptext": "SharePoint or iManage link to the document. File upload is disabled â€” this is always required."
+      },
+      {
+        "sbs_fieldid": 10,
+        "sbs_fieldname": "numberOfCopies",
+        "sbs_displayname": "Number of Copies",
+        "sbs_fieldtype": "Number",
+        "sbs_validvalues": null,
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "How many copies to print"
+      },
+      {
+        "sbs_fieldid": 11,
+        "sbs_fieldname": "colourMode",
+        "sbs_displayname": "Colour Mode",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"BlackWhite\",\"Colour\"]",
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Print in black and white or colour"
+      },
+      {
+        "sbs_fieldid": 12,
+        "sbs_fieldname": "paperSize",
+        "sbs_displayname": "Paper Size",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Paper size required e.g. A4, A3"
+      },
+      {
+        "sbs_fieldid": 13,
+        "sbs_fieldname": "paginationRequired",
+        "sbs_displayname": "Pagination Required",
+        "sbs_fieldtype": "Boolean",
+        "sbs_validvalues": null,
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Does this document require pagination"
+      },
+      {
+        "sbs_fieldid": 14,
+        "sbs_fieldname": "paginationInstructions",
+        "sbs_displayname": "Pagination Instructions",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Required when paginationRequired is true â€” describe pagination requirements"
+      },
+      {
+        "sbs_fieldid": 15,
+        "sbs_fieldname": "finishingOption",
+        "sbs_displayname": "Finishing Option",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"StapleOnly\",\"None\"]",
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Finishing option from the organisation approved set. Update valid values to match full org set.",
+        "note": "ValidValues must be updated to match the full organisation FinishingOption set before go-live"
+      },
+      {
+        "sbs_fieldid": 16,
+        "sbs_fieldname": "staplePosition",
+        "sbs_displayname": "Staple Position",
+        "sbs_fieldtype": "Choice",
+        "sbs_validvalues": "[\"TopLeft\",\"TopRight\"]",
+        "sbs_section": "printSpecifications",
+        "sbs_helptext": "Required when finishingOption is StapleOnly"
+      },
+      {
+        "sbs_fieldid": 17,
+        "sbs_fieldname": "returnMethod",
+        "sbs_displayname": "Return Method",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "return",
+        "sbs_helptext": "How the printed document should be returned. Saying 'Collection from [location]' counts as providing this value.",
+        "note": "Convert to Choice once returnMethod valid values are confirmed"
+      },
+      {
+        "sbs_fieldid": 18,
+        "sbs_fieldname": "returnLocationDetails",
+        "sbs_displayname": "Return Location Details",
+        "sbs_fieldtype": "Text",
+        "sbs_validvalues": null,
+        "sbs_section": "return",
+        "sbs_helptext": "Location details for return delivery",
+        "note": "ConditionalValue on returnMethod to be confirmed once returnMethod valid values are defined"
+      },
+      {
+        "sbs_fieldid": 19,
+        "sbs_fieldname": "returnDateTime",
+        "sbs_displayname": "Return Date and Time",
+        "sbs_fieldtype": "DateTime",
+        "sbs_validvalues": null,
+        "sbs_section": "return",
+        "sbs_helptext": "Must include both a date AND a time. A date alone e.g. Friday is not valid."
+      }
+    ],
+
+    "sbs_ServiceField": [
+      {
+        "sbs_servicefieldid": 1,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 1,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 10,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 2,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 2,
+        "sbs_isrequired": true,
+        "sbs_displayorder": 20,
+        "sbs_isconditional": false,
+        "sbs_conditionalonfield": null,
+        "sbs_conditionalvalue": null
+      },
+      {
+        "sbs_servicefieldid": 3,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 3,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 30,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "chargeCostType",
+        "sbs_conditionalvalue": "ClientMatter"
+      },
+      {
+        "sbs_servicefieldid": 4,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 4,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 40,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "chargeCostType",
+        "sbs_conditionalvalue": "ClientMatter"
+      },
+      {
+        "sbs_servicefieldid": 5,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 5,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 50,
+        "sbs_isconditional": true,
+        "sbs_conditionalonfield": "chargeCostType",
+        "sbs_conditionalvalue": "ClientMatter"
+      },
+      {
+        "sbs_servicefieldid": 6,
+        "sbs_serviceid": 1,
+        "sbs_fieldid": 6,
+        "sbs_isrequired": false,
+        "sbs_displayorder": 60,
+    
