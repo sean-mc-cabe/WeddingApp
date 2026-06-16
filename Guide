@@ -1,774 +1,621 @@
-# HR Copilot Studio Agent — Full Build Guide
-
-**Version:** 1.0  
-**Stack:** Microsoft 365, SharePoint Online, Power Automate, AI Builder, Copilot Studio  
-**Scope:** SharePoint schema, Power Automate flows, Copilot Studio configuration
-
----
-
-## Table of Contents
-
-1. [Solution Overview](#1-solution-overview)
-2. [Prerequisites](#2-prerequisites)
-3. [SharePoint Site Setup](#3-sharepoint-site-setup)
-4. [Library 1 — HR Staging](#4-library-1--hr-staging)
-5. [Library 2 — Agent Knowledge](#5-library-2--agent-knowledge)
-6. [Supporting Lists](#6-supporting-lists)
-7. [Power Automate — Flow 1: Document Enrichment Pipeline](#7-power-automate--flow-1-document-enrichment-pipeline)
-8. [Power Automate — Flow 2: Status Sync & Removal Flow](#8-power-automate--flow-2-status-sync--removal-flow)
-9. [Power Automate — Flow 3: Review Date Reminder](#9-power-automate--flow-3-review-date-reminder)
-10. [Copilot Studio Configuration](#10-copilot-studio-configuration)
-11. [Testing Checklist](#11-testing-checklist)
-12. [Reuse Guide — Deploying for Other Domains](#12-reuse-guide--deploying-for-other-domains)
-
----
-
-## 1. Solution Overview
-
-### Architecture
-
-```
-HR STAFF                   PIPELINE                        AGENT
-────────                   ────────                        ─────
-
-Upload document    ──▶    Validate file type
-Fill 6 fields      ──▶    Check for scanned PDF
-                          Detect duplicates
-                          Generate AI description
-                          Generate AI keywords
-                          Confidence score check
-                          Copy enriched doc         ──▶   Copilot Studio
-                          to Library 2                    points ONLY at
-                                                          Library 2
-
-Change Status      ──▶    Status Sync Flow
-in Library 1              removes doc from
-(to anything              Library 2 immediately
-other than
-Published)
-```
-
-### Flow Summary
-
-| Flow | Trigger | Purpose |
-|------|---------|---------|
-| Enrichment Pipeline | New file in Library 1 | Validate, enrich, publish to Library 2 |
-| Status Sync | Item modified in Library 1 | Remove from Library 2 when status != Published |
-| Review Reminder | Daily schedule | Notify document owner 30 days before review date |
-
----
-
-## 2. Prerequisites
-
-Before starting, confirm the following are available:
-
-| Requirement | Where to Check |
-|-------------|---------------|
-| SharePoint Online site collection admin rights | M365 Admin Centre |
-| Power Automate Premium licence (per user or per flow) | M365 Admin Centre |
-| AI Builder credits allocated to environment | Power Platform Admin Centre |
-| Copilot Studio licence | M365 Admin Centre |
-| Power Platform environment (Production recommended) | Power Platform Admin Centre |
-
-> **AI Builder note:** AI Builder Prompt actions require Power Automate Premium. Most organisations have this via Microsoft 365 E3/E5 or via standalone Power Automate Premium licences. Verify before building.
-
----
-
-## 3. SharePoint Site Setup
-
-### 3.1 Create the SharePoint Site
-
-1. Navigate to **SharePoint Admin Centre** → **Active Sites** → **Create**
-2. Select **Team site**
-3. Configure:
-   - **Site name:** `HR-Copilot-Knowledge`
-   - **Site address:** `/sites/HR-Copilot-Knowledge`
-   - **Primary admin:** HR Systems owner
-   - **Additional owners:** IT admin responsible for flows
-4. Click **Create**
-
-### 3.2 Set Site Permissions
-
-| Group | Permission Level | Who |
-|-------|----------------|-----|
-| HR Staging Contributors | Contribute | All HR staff who upload documents |
-| HR Admins | Full Control | HR systems team |
-| Pipeline Service Account | Full Control | Account used by Power Automate |
-| Agent Read Group | Read | All staff (for agent access) |
-
-> **Recommended:** Use a dedicated service account or managed identity for Power Automate connections rather than an individual's account. This prevents flows breaking when staff leave.
-
-### 3.3 Create Folder Structure
-
-Within the site, create the following folders manually:
-
-```
-HR-Copilot-Knowledge (Site)
-│
-├── Library 1 — HR Staging
-│     ├── /Pending
-│     ├── /Rejected
-│     └── /Needs-Review
-│
-├── Library 2 — Agent Knowledge
-│     ├── /Active
-│     └── /Removed
-│
-├── Pipeline Audit Log (List)
-└── Rejected Documents Register (List)
-```
-
----
-
-## 4. Library 1 — HR Staging
-
-This is the human-facing upload library. HR staff interact only with this library.
-
-### 4.1 Create the Library
-
-1. In the site, click **New** → **Document Library**
-2. Name: `HR Staging`
-3. Click **Create**
-
-### 4.2 Add Columns
-
-Navigate to **Library Settings** → **Create Column** for each of the following.
-
----
-
-#### TIER 1 — Core Columns (all required)
-
-**Column 1: Document_Title**
-- Type: `Single line of text`
-- Name: `Document_Title`
-- Required: Yes
-- Description: `Friendly display name for the document`
-
-**Column 2: Domain**
-- Type: `Choice`
-- Name: `Domain`
-- Required: Yes
-- Choices:
-  ```
-  HR
-  IT
-  Finance
-  Legal
-  Facilities
-  Operations
-  ```
-- Default value: `HR`
-
-**Column 3: Document_Type**
-- Type: `Choice`
-- Name: `Document_Type`
-- Required: Yes
-- Choices:
-  ```
-  Policy
-  Procedure
-  Form
-  FAQ
-  Guidance
-  Reference
-  ```
-
-**Column 4: Audience**
-- Type: `Choice`
-- Name: `Audience`
-- Required: Yes
-- Choices:
-  ```
-  All Staff
-  Managers
-  Department Only
-  HR Admin Only
-  ```
-
-**Column 5: Effective_Date**
-- Type: `Date and Time`
-- Name: `Effective_Date`
-- Required: Yes
-- Format: `Date only`
-
-**Column 6: Review_Date**
-- Type: `Date and Time`
-- Name: `Review_Date`
-- Required: Yes
-- Format: `Date only`
-
-**Column 7: Document_Owner**
-- Type: `Person or Group`
-- Name: `Document_Owner`
-- Required: Yes
-- Allow multiple: No
-- Description: `Person accountable for this document's accuracy`
-
----
-
-#### TIER 2 — Pipeline Status Columns (system managed — set as read-only for contributors)
-
-**Column 8: Pipeline_Status**
-- Type: `Choice`
-- Name: `Pipeline_Status`
-- Required: No (set by flow)
-- Choices:
-  ```
-  Pending
-  Processing
-  Published
-  Failed
-  Needs Review
-  Duplicate Review
-  Rejected
-  ```
-- Default value: `Pending`
-
-**Column 9: Rejection_Reason**
-- Type: `Single line of text`
-- Name: `Rejection_Reason`
-- Required: No
-
-**Column 10: Published_Date**
-- Type: `Date and Time`
-- Name: `Published_Date`
-- Required: No
-- Format: `Date and Time`
-
-**Column 11: AI_Confidence**
-- Type: `Choice`
-- Name: `AI_Confidence`
-- Required: No
-- Choices:
-  ```
-  High
-  Medium
-  Low
-  ```
-
-**Column 12: AI_Confidence_Reason**
-- Type: `Single line of text`
-- Name: `AI_Confidence_Reason`
-- Required: No
-
----
-
-#### TIER 3 — Domain-Specific Columns
-
-**Column 13: HR_Topic**
-- Type: `Choice`
-- Name: `HR_Topic`
-- Required: No
-- Choices:
-  ```
-  Leave
-  Pay
-  Conduct
-  Benefits
-  Onboarding
-  Offboarding
-  Recruitment
-  Learning & Development
-  Health & Safety
-  Equality & Diversity
-  ```
-
-> Note: Tier 3 columns are optional at upload. The AI enrichment will help categorise where staff leave these blank.
-
-### 4.3 Create a Default View for HR Staff
-
-1. Go to **Library Settings** → **Create View**
-2. Name: `My Submissions`
-3. Columns to show:
-   - Document_Title
-   - Document_Type
-   - HR_Topic
-   - Pipeline_Status
-   - AI_Confidence
-   - Published_Date
-   - Review_Date
-4. Filter: `Submitted_By` is equal to `[Me]`
-5. Set as default view for contributors
-
-### 4.4 Create an Admin View
-
-1. Create another view named `All Documents — Admin`
-2. Show all columns
-3. No filter
-4. Set as visible to HR Admins group only
-
----
-
-## 5. Library 2 — Agent Knowledge
-
-This library is the Copilot Studio knowledge source. HR staff have read-only access. Only Power Automate writes here.
-
-### 5.1 Create the Library
-
-1. Click **New** → **Document Library**
-2. Name: `Agent Knowledge`
-3. Click **Create**
-
-### 5.2 Set Permissions
-
-1. Go to **Library Settings** → **Permissions for this document library**
-2. **Stop inheriting permissions**
-3. Set:
-   - HR Staging Contributors: `Read`
-   - HR Admins: `Full Control`
-   - Pipeline Service Account: `Full Control`
-   - Agent Read Group: `Read`
-
-### 5.3 Add Columns
-
-Create the same Tier 1 columns as Library 1, plus the following additional columns:
-
-**Column 1–13:** Replicate all columns from Library 1 exactly (same names, same types, same choices)
-
-Then add:
-
-**Column 14: AI_Description**
-- Type: `Multiple lines of text`
-- Name: `AI_Description`
-- Required: No
-- Plain text (not enhanced rich text)
-
-**Column 15: AI_Keywords**
-- Type: `Multiple lines of text`
-- Name: `AI_Keywords`
-- Required: No
-
-**Column 16: Source_Document_ID**
-- Type: `Single line of text`
-- Name: `Source_Document_ID`
-- Required: No
-- Description: `ID of the corresponding item in Library 1`
-
-**Column 17: Enrichment_Version**
-- Type: `Single line of text`
-- Name: `Enrichment_Version`
-- Default value: `v1.0`
-
-### 5.4 Default View for Agent Knowledge
-
-Create a view named `Active Documents`:
-- Filter: `Pipeline_Status` is equal to `Published`
-- This is the view Copilot Studio should reference
-
----
-
-## 6. Supporting Lists
-
-### 6.1 Pipeline Audit Log
-
-1. Click **New** → **List**
-2. Name: `Pipeline Audit Log`
-3. Add columns:
-
-| Column Name | Type | Notes |
-|-------------|------|-------|
-| `Title` | Single line (default) | Auto: Document filename |
-| `Source_Document_ID` | Single line | Library 1 item ID |
-| `Run_Timestamp` | Date and Time | When pipeline ran |
-| `Outcome` | Choice | Published, Failed, Rejected, Duplicate, Needs Review |
-| `Confidence_Score` | Choice | High, Medium, Low |
-| `Confidence_Reason` | Single line | AI reasoning |
-| `Rejection_Reason` | Single line | If applicable |
-| `Enrichment_Version` | Single line | Prompt version used |
-| `Submitted_By` | Person | From Library 1 |
-
-### 6.2 Rejected Documents Register
-
-1. Click **New** → **List**
-2. Name: `Rejected Documents Register`
-3. Add columns:
-
-| Column Name | Type | Notes |
-|-------------|------|-------|
-| `Title` | Single line (default) | Document filename |
-| `Rejection_Date` | Date and Time | Auto |
-| `Rejection_Reason` | Single line | Auto from flow |
-| `Rejection_Type` | Choice | Wrong File Type, Scanned PDF, Low Confidence, Duplicate |
-| `Submitted_By` | Person | Auto |
-| `Document_Owner` | Person | From Library 1 |
-| `Resolution_Status` | Choice | Pending, Resolved, Dismissed |
-| `Resolution_Notes` | Multiple lines | HR admin notes |
-
----
-
-## 7. Power Automate — Flow 1: Document Enrichment Pipeline
-
-### Overview
-
-**Trigger:** When a new file is created in Library 1  
-**Purpose:** Validate, enrich, and publish document to Library 2
-
----
-
-### 7.1 Create the Flow
-
-1. Go to **Power Automate** → **Create** → **Automated cloud flow**
-2. Name: `HR — Document Enrichment Pipeline`
-3. Trigger: `SharePoint — When a file is created (properties only)`
-4. Configure trigger:
-   - Site Address: `[Your HR Copilot Knowledge site URL]`
-   - Library Name: `HR Staging`
-
----
-
-### 7.2 Action 1 — Initialize Variables
-
-Add a **Parallel Branch** with the following variable initializations (run together):
-
-```
-Initialize variable — varFileExtension
-  Name: varFileExtension
-  Type: String
-  Value: (empty)
-
-Initialize variable — varExtractedText
-  Name: varExtractedText
-  Type: String
-  Value: (empty)
-
-Initialize variable — varAIDescription
-  Name: varAIDescription
-  Type: String
-  Value: (empty)
-
-Initialize variable — varAIKeywords
-  Name: varAIKeywords
-  Type: String
-  Value: (empty)
-
-Initialize variable — varConfidence
-  Name: varConfidence
-  Type: String
-  Value: (empty)
-
-Initialize variable — varConfidenceReason
-  Name: varConfidenceReason
-  Type: String
-  Value: (empty)
-
-Initialize variable — varIsDuplicate
-  Name: varIsDuplicate
-  Type: Boolean
-  Value: false
-```
-
----
-
-### 7.3 Action 2 — Set Pipeline Status to Processing
-
-```
-SharePoint — Update file properties
-  Site Address: [Site URL]
-  Library Name: HR Staging
-  ID: [ID from trigger]
-  Pipeline_Status: Processing
-```
-
----
-
-### 7.4 Action 3 — Get File Content
-
-```
-SharePoint — Get file content
-  Site Address: [Site URL]
-  File Identifier: [Identifier from trigger — use the ID field]
-```
-
----
-
-### 7.5 Action 4 — Set File Extension Variable
-
-```
-Set variable — varFileExtension
-  Value: 
-  toLower(last(split(triggerOutputs()?['body/{FilenameWithExtension}'], '.')))
-```
-
----
-
-### 7.6 Action 5 — File Type Validation (Condition)
-
-```
-Condition:
-  varFileExtension — is not equal to — pdf
-  AND
-  varFileExtension — is not equal to — docx
-  AND
-  varFileExtension — is not equal to — doc
-  AND
-  varFileExtension — is not equal to — xlsx
-```
-
-**If TRUE (unsupported file type) — Rejection Branch A:**
-
-```
-Step A1 — SharePoint: Update file properties
-  Pipeline_Status: Rejected
-  Rejection_Reason: Unsupported file type. Please upload PDF or DOCX only.
-
-Step A2 — SharePoint: Move file
-  Current site: [Site URL]
-  Current library: HR Staging
-  File to move: [Full path from trigger]
-  Destination site: [Site URL]
-  Destination path: /HR Staging/Rejected
-
-Step A3 — SharePoint: Create item (Rejected Documents Register)
-  Title: [FilenameWithExtension from trigger]
-  Rejection_Date: utcNow()
-  Rejection_Reason: Unsupported file type
-  Rejection_Type: Wrong File Type
-  Submitted_By: [Created By from trigger]
-  Resolution_Status: Pending
-
-Step A4 — Office 365 Outlook: Send an email
-  To: [Created By Email from trigger]
-  Subject: Document upload rejected — @{triggerOutputs()?['body/{FilenameWithExtension}']}
-  Body:
-    Hi @{triggerOutputs()?['body/{Author/DisplayName}']},
-
-    Your document could not be processed.
-
-    Document: @{triggerOutputs()?['body/{FilenameWithExtension}']}
-    Reason: File type not supported.
-
-    Please re-upload your document as a PDF or DOCX file.
-
-    If you need assistance, please contact the HR systems team.
-
-    This is an automated message.
-
-Step A5 — Terminate
-  Status: Succeeded
-```
-
-**If FALSE — continue to next step**
-
----
-
-### 7.7 Action 6 — Extract Text from Document
-
-```
-AI Builder — Extract text from file
-  File: [File Content from Action 3]
-
-→ Output stored in expression for next step:
-  outputs('Extract_text_from_file')?['text']
-```
-
-```
-Set variable — varExtractedText
-  Value: outputs('Extract_text_from_file')?['text']
-```
-
----
-
-### 7.8 Action 7 — Scanned PDF / Empty Document Check (Condition)
-
-```
-Condition:
-  length(variables('varExtractedText')) — is less than — 500
-```
-
-**If TRUE (likely scanned or empty) — Rejection Branch B:**
-
-```
-Step B1 — SharePoint: Update file properties
-  Pipeline_Status: Needs Review
-  Rejection_Reason: Document appears to be a scanned PDF or contains no readable text.
-
-Step B2 — SharePoint: Move file
-  Destination path: /HR Staging/Needs-Review
-
-Step B3 — SharePoint: Create item (Rejected Documents Register)
-  Title: [Filename]
-  Rejection_Type: Scanned PDF
-  Rejection_Reason: Fewer than 500 characters extracted. Likely scanned PDF.
-  Resolution_Status: Pending
-
-Step B4 — Office 365 Outlook: Send an email
-  To: [Created By Email]
-  Subject: Document needs attention — @{triggerOutputs()?['body/{FilenameWithExtension}']}
-  Body:
-    Hi @{triggerOutputs()?['body/{Author/DisplayName}']},
-
-    Your document could not be automatically processed.
-
-    Document: @{triggerOutputs()?['body/{FilenameWithExtension}']}
-    Reason: The document appears to be a scanned PDF or contains no 
-    readable text. Our system requires text-based documents to generate 
-    metadata automatically.
-
-    Please re-upload a text-based PDF or DOCX version of this document.
-    If this document must remain as a scanned PDF, please contact the 
-    HR systems team for manual processing.
-
-    This is an automated message.
-
-Step B5 — Terminate
-  Status: Succeeded
-```
-
-**If FALSE — continue**
-
----
-
-### 7.9 Action 8 — Duplicate Detection
-
-```
-SharePoint — Get items
-  Site Address: [Site URL]
-  List Name: Agent Knowledge
-  Filter Query: 
-    Document_Title eq '@{triggerOutputs()?['body/{FilenameWithExtension}']}'
-    and Pipeline_Status eq 'Published'
-  Top Count: 1
-```
-
-```
-Condition:
-  length(outputs('Get_items')?['body/value']) — is greater than — 0
-```
-
-**If TRUE (duplicate found):**
-
-```
-Step C1 — Set variable: varIsDuplicate = true
-
-Step C2 — SharePoint: Update file properties (Library 1)
-  Pipeline_Status: Duplicate Review
-  Rejection_Reason: A published document with this name already exists in the knowledge base.
-
-Step C3 — SharePoint: Create item (Rejected Documents Register)
-  Rejection_Type: Duplicate
-  Resolution_Status: Pending
-
-Step C4 — Office 365 Outlook: Send an email
-  To: [Created By Email]
-  CC: [Document_Owner from trigger if different]
-  Subject: Duplicate document detected — @{triggerOutputs()?['body/{FilenameWithExtension}']}
-  Body:
-    Hi @{triggerOutputs()?['body/{Author/DisplayName}']},
-
-    A published version of this document already exists in the 
-    knowledge base.
-
-    Document: @{triggerOutputs()?['body/{FilenameWithExtension}']}
-
-    If this is an updated version, please:
-    1. Locate the existing document in the Agent Knowledge library
-    2. Set its status to Archived in Library 1 first
-    3. Then re-upload your new version
-
-    If you believe this is an error, please contact the HR systems team.
-
-Step C5 — Terminate
-  Status: Succeeded
-```
-
-**If FALSE — continue**
-
----
-
-### 7.10 Action 9 — AI Builder Enrichment Prompt
-
-```
-AI Builder — Create text with GPT using a prompt
-```
-
-**Prompt text (paste exactly):**
-
-```
-You are an HR document metadata assistant. Your job is to analyse 
-HR documents and generate accurate, searchable metadata.
-
-Analyse the following document text and return ONLY a valid JSON 
-object. No preamble, no explanation, no markdown formatting, 
-no code fences. Return the raw JSON object only.
-
-{
-  "description": "A 2-3 sentence plain English summary of what this document covers, 
-                  who it applies to, and what actions or information it provides. 
-                  Begin with the document type and primary topic.",
-  "keywords": "A comma-separated list of 10-15 keywords and phrases that an employee 
-               would realistically type when searching for this document. Include 
-               synonyms and related terms.",
-  "confidence": "HIGH, MEDIUM, or LOW based on how clearly the document text 
-                 allowed you to generate accurate metadata",
-  "confidence_reason": "One sentence explaining your confidence rating. 
-                        Write 'N/A' if confidence is HIGH."
+#requires -Version 5.1
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$UnpackedFolder,
+
+    [Parameter(Mandatory=$true)]
+    [string]$OutputFolder,
+
+    [int]$RawYamlLineCap = 400
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Get-Xml {
+    param([string]$Path)
+    if (-not $Path) { return $null }
+    if (-not (Test-Path $Path)) { return $null }
+    try { return [xml](Get-Content -Path $Path -Raw -Encoding UTF8) } catch { return $null }
 }
 
-Rules:
-- Description must be factual, not promotional
-- Keywords must reflect real employee search behaviour
-- If the document text is fragmentary, heavily formatted, or unclear, 
-  set confidence to LOW and explain why
-- If document text appears to be a form with mostly blank fields, 
-  set confidence to LOW
+function Get-ChildText {
+    param($Node,[string]$Name)
+    if ($null -eq $Node) { return $null }
+    $c = $Node.SelectSingleNode($Name)
+    if ($c) { return $c.InnerText } else { return $null }
+}
 
-DOCUMENT TEXT (first 5000 characters):
-@{substring(variables('varExtractedText'), 0, min(5000, length(variables('varExtractedText'))))}
-```
+function Get-Attr {
+    param($Node,[string]$Name)
+    if ($null -eq $Node) { return $null }
+    if ($Node.NodeType -ne [System.Xml.XmlNodeType]::Element) { return $null }
+    if ($Node.HasAttribute($Name)) { return $Node.GetAttribute($Name) } else { return $null }
+}
 
-> Store the response in a variable: `varAIRawResponse`
-
----
-
-### 7.11 Action 10 — Parse AI Response
-
-```
-Data Operations — Parse JSON
-  Content: @{outputs('Create_text_with_GPT_using_a_prompt')?['text']}
-  Schema:
-  {
-    "type": "object",
-    "properties": {
-      "description": { "type": "string" },
-      "keywords": { "type": "string" },
-      "confidence": { "type": "string" },
-      "confidence_reason": { "type": "string" }
+function Find-File {
+    param([string]$Root,[string[]]$Candidates)
+    foreach ($c in $Candidates) {
+        $p = Join-Path $Root $c
+        if (Test-Path $p) { return $p }
     }
-  }
-```
+    return $null
+}
 
-```
-Set variable — varAIDescription
-  Value: [description from Parse JSON]
+function Parse-Entity {
+    param($EntityEl)
+    $entity = $EntityEl.SelectSingleNode("EntityInfo/entity")
+    if (-not $entity) { return $null }
+    $logical = Get-Attr $entity 'Name'
+    if (-not $logical) { $logical = Get-ChildText $EntityEl 'Name' }
+    if (-not $logical) { return $null }
+    $dispNode = $entity.SelectSingleNode("LocalizedNames/LocalizedName")
+    $display = if ($dispNode) { Get-Attr $dispNode 'description' } else { $logical }
+    if (-not $display) { $display = $logical }
+    $cols = New-Object System.Collections.ArrayList
+    foreach ($a in $EntityEl.SelectNodes("EntityInfo/entity/attributes/attribute")) {
+        $colLogical = Get-ChildText $a 'LogicalName'
+        if (-not $colLogical) { $colLogical = Get-Attr $a 'PhysicalName' }
+        if (-not $colLogical) { continue }
+        $type = Get-ChildText $a 'Type'
+        $req  = Get-ChildText $a 'RequiredLevel'
+        $dn = $a.SelectSingleNode("displaynames/displayname")
+        $colDisplay = if ($dn) { Get-Attr $dn 'description' } else { $colLogical }
+        if (-not $colDisplay) { $colDisplay = $colLogical }
+        $optionText = ''
+        $optNodes = $a.SelectNodes("optionset/options/option")
+        if ($optNodes -and $optNodes.Count -gt 0) {
+            $parts = New-Object System.Collections.ArrayList
+            foreach ($o in $optNodes) {
+                $val = Get-Attr $o 'value'
+                $lbl = $o.SelectSingleNode("labels/label")
+                $lblText = if ($lbl) { Get-Attr $lbl 'description' } else { '' }
+                [void]$parts.Add("$val=$lblText")
+            }
+            $optionText = ($parts -join '; ')
+        }
+        [void]$cols.Add([pscustomobject]@{ Table=$logical; Logical=$colLogical; Display=$colDisplay; Type=$type; Required=$req; Choices=$optionText })
+    }
+    return [pscustomobject]@{
+        Logical=$logical
+        Display=$display
+        Element=$EntityEl
+        Columns=$cols
+    }
+}
 
-Set variable — varAIKeywords
-  Value: [keywords from Parse JSON]
+function Get-EntityElements {
+    param([string]$Root,$Cust)
+    $els = New-Object System.Collections.ArrayList
+    $entitiesDir = Join-Path $Root 'Entities'
+    if (Test-Path $entitiesDir) {
+        foreach ($dir in Get-ChildItem -Path $entitiesDir -Directory) {
+            $xml = Get-Xml (Join-Path $dir.FullName 'Entity.xml')
+            if ($xml -and $xml.DocumentElement) { [void]$els.Add($xml.DocumentElement) }
+        }
+    } elseif ($Cust) {
+        foreach ($e in $Cust.DocumentElement.SelectNodes("Entities/Entity")) { [void]$els.Add($e) }
+    }
+    return $els
+}
 
-Set variable — varConfidence
-  Value: [confidence from Parse JSON]
+function Read-Relationships {
+    param([string]$Root,$Cust)
+    $rels = New-Object System.Collections.ArrayList
+    $relNodes = $null
+    $relFile = Join-Path $Root 'Other\Relationships.xml'
+    if (Test-Path $relFile) {
+        $xml = Get-Xml $relFile
+        if ($xml) { $relNodes = $xml.SelectNodes("//EntityRelationship") }
+    } elseif ($Cust) {
+        $relNodes = $Cust.DocumentElement.SelectNodes("EntityRelationships/EntityRelationship")
+    }
+    if ($relNodes) {
+        foreach ($r in $relNodes) {
+            $name = Get-Attr $r 'Name'
+            if (-not $name) { $name = Get-ChildText $r 'EntityRelationshipName' }
+            $type = Get-ChildText $r 'EntityRelationshipType'
+            if ($type -eq 'ManyToMany') {
+                [void]$rels.Add([pscustomobject]@{ Name=$name; Type=$type; Referencing=(Get-ChildText $r 'FirstEntityName'); Referenced=(Get-ChildText $r 'SecondEntityName'); ViaAttribute='' })
+            } else {
+                [void]$rels.Add([pscustomobject]@{ Name=$name; Type=$type; Referencing=(Get-ChildText $r 'ReferencingEntityName'); Referenced=(Get-ChildText $r 'ReferencedEntityName'); ViaAttribute=(Get-ChildText $r 'ReferencingAttributeName') })
+            }
+        }
+    }
+    return $rels
+}
 
-Set variable — varConfidenceReason
-  Value: [confidence_reason from Parse JSON]
-```
+function Read-AppModules {
+    param([string]$Root,$Cust)
+    $apps = New-Object System.Collections.ArrayList
+    $appNodes = New-Object System.Collections.ArrayList
+    $dir = Join-Path $Root 'AppModules'
+    if (Test-Path $dir) {
+        foreach ($appDir in Get-ChildItem -Path $dir -Directory) {
+            $appXml = Get-Xml (Join-Path $appDir.FullName 'AppModule.xml')
+            if ($appXml -and $appXml.DocumentElement) { [void]$appNodes.Add($appXml.DocumentElement) }
+        }
+    } elseif ($Cust) {
+        foreach ($n in $Cust.DocumentElement.SelectNodes("AppModules/AppModule")) { [void]$appNodes.Add($n) }
+    }
+    foreach ($n in $appNodes) {
+        $unique = Get-ChildText $n 'UniqueName'
+        if (-not $unique) { $unique = Get-Attr $n 'UniqueName' }
+        if (-not $unique) { $unique = Get-Attr $n 'Name' }
+        $display = Get-ChildText $n 'Name'
+        $ln = $n.SelectSingleNode(".//LocalizedNames/LocalizedName")
+        if ($ln) { $d = Get-Attr $ln 'description'; if ($d) { $display = $d } }
+        if (-not $display) { $display = $unique }
+        [void]$apps.Add([pscustomobject]@{ Unique=$unique; Display=$display })
+    }
+    return $apps
+}
 
----
+function Parse-SiteMapNode {
+    param($Container,[string]$Name)
+    $areas = New-Object System.Collections.ArrayList
+    foreach ($area in $Container.SelectNodes(".//Area")) {
+        $areaTitle = Get-Attr $area 'Title'
+        if (-not $areaTitle) { $t = $area.SelectSingleNode("Titles/Title"); if ($t) { $areaTitle = Get-Attr $t 'Title' } }
+        if (-not $areaTitle) { $areaTitle = Get-Attr $area 'Id' }
+        $groups = New-Object System.Collections.ArrayList
+        foreach ($grp in $area.SelectNodes("Group")) {
+            $grpTitle = Get-Attr $grp 'Title'
+            if (-not $grpTitle) { $t = $grp.SelectSingleNode("Titles/Title"); if ($t) { $grpTitle = Get-Attr $t 'Title' } }
+            if (-not $grpTitle) { $grpTitle = Get-Attr $grp 'Id' }
+            $subs = New-Object System.Collections.ArrayList
+            foreach ($sa in $grp.SelectNodes("SubArea")) {
+                $saTitle = Get-Attr $sa 'Title'
+                if (-not $saTitle) { $t = $sa.SelectSingleNode("Titles/Title"); if ($t) { $saTitle = Get-Attr $t 'Title' } }
+                [void]$subs.Add([pscustomobject]@{ Title=$saTitle; Entity=(Get-Attr $sa 'Entity'); Url=(Get-Attr $sa 'Url') })
+            }
+            [void]$groups.Add([pscustomobject]@{ Title=$grpTitle; SubAreas=$subs })
+        }
+        [void]$areas.Add([pscustomobject]@{ Title=$areaTitle; Groups=$groups })
+    }
+    return [pscustomobject]@{ Name=$Name; Areas=$areas }
+}
 
-### 7.12 Action 11 — Confidence Check (Condition)
+function Read-SiteMaps {
+    param([string]$Root,$Cust)
+    $maps = New-Object System.Collections.ArrayList
+    $appDir = Join-Path $Root 'AppModules'
+    if (Test-Path $appDir) {
+        foreach ($xmlFile in Get-ChildItem -Path $appDir -Recurse -Filter *.xml) {
+            $sm = Get-Xml $xmlFile.FullName
+            if ($sm -and $sm.SelectNodes("//Area").Count -gt 0) { [void]$maps.Add((Parse-SiteMapNode -Container $sm -Name $xmlFile.BaseName)) }
+        }
+    }
+    if ($maps.Count -eq 0 -and $Cust) {
+        foreach ($asm in $Cust.DocumentElement.SelectNodes("AppModuleSiteMaps/AppModuleSiteMap")) {
+            if ($asm.SelectNodes(".//Area").Count -gt 0) {
+                $nm = Get-ChildText $asm 'SiteMapUniqueName'
+                if (-not $nm) { $nm = Get-Attr $asm 'SiteMapUniqueName' }
+                if (-not $nm) { $nm = 'sitemap' }
+                [void]$maps.Add((Parse-SiteMapNode -Container $asm -Name $nm))
+            }
+        }
+    }
+    if ($maps.Count -eq 0 -and $Cust) {
+        $i = 0
+        foreach ($sm in $Cust.DocumentElement.SelectNodes("SiteMaps/SiteMap")) {
+            if ($sm.SelectNodes(".//Area").Count -gt 0) { $i++; [void]$maps.Add((Parse-SiteMapNode -Container $sm -Name ("sitemap_$i"))) }
+        }
+    }
+    return $maps
+}
 
-```
-Condition:
-  varConfidence — is equal to — LOW
-```
+function Read-FormsAndViews {
+    param($EntityResults)
+    $forms = New-Object System.Collections.ArrayList
+    $views = New-Object System.Collections.ArrayList
+    $formTypeMap = @{ '2'='Main'; '5'='Mobile'; '6'='QuickView'; '7'='QuickCreate'; '8'='Dialog'; '9'='AppointmentBook'; '11'='Card'; '12'='MainInteractive' }
+    foreach ($er in $EntityResults) {
+        $entityEl = $er.Element
+        $table = $er.Logical
+        $formContainer = $entityEl.SelectSingleNode("FormXml/forms")
+        if ($formContainer) {
+            foreach ($systemform in $formContainer.SelectNodes("systemform")) {
+                $formName = Get-ChildText $systemform "LocalizedNames/LocalizedName"
+                if (-not $formName) { $ln = $systemform.SelectSingleNode("LocalizedNames/LocalizedName"); if ($ln) { $formName = Get-Attr $ln 'description' } }
+                if (-not $formName) { $formName = '(unnamed)' }
+                $typeCodeAttr = Get-Attr ($formContainer) 'type'
+                $formNode = $systemform.SelectSingleNode("form")
+                $typeCode = if ($formNode) { Get-Attr $formNode 'type' } else { $null }
+                $formType = if ($typeCode -and $formTypeMap.ContainsKey($typeCode)) { $formTypeMap[$typeCode] } elseif ($typeCode) { "type$typeCode" } else { '' }
+                $anyField = $false
+                foreach ($tab in $systemform.SelectNodes(".//tab")) {
+                    $tabName = Get-Attr $tab 'name'
+                    if (-not $tabName) { $t = $tab.SelectSingleNode("labels/label"); if ($t) { $tabName = Get-Attr $t 'description' } }
+                    foreach ($section in $tab.SelectNodes(".//section")) {
+                        $sectionName = Get-Attr $section 'name'
+                        if (-not $sectionName) { $s = $section.SelectSingleNode("labels/label"); if ($s) { $sectionName = Get-Attr $s 'description' } }
+                        foreach ($control in $section.SelectNodes(".//control")) {
+                            $field = Get-Attr $control 'datafieldname'
+                            if (-not $field) { continue }
+                            $anyField = $true
+                            [void]$forms.Add([pscustomobject]@{ Table=$table; Form=$formName; Type=$formType; Tab=$tabName; Section=$sectionName; Field=$field })
+                        }
+                    }
+                }
+                if (-not $anyField) {
+                    [void]$forms.Add([pscustomobject]@{ Table=$table; Form=$formName; Type=$formType; Tab=''; Section=''; Field='' })
+                }
+            }
+        }
+        $sqContainer = $entityEl.SelectSingleNode("SavedQueries/savedqueries")
+        if ($sqContainer) {
+            foreach ($sq in $sqContainer.SelectNodes("savedquery")) {
+                $viewName = ''
+                $ln = $sq.SelectSingleNode("LocalizedNames/LocalizedName")
+                if ($ln) { $viewName = Get-Attr $ln 'description' }
+                if (-not $viewName) { $viewName = Get-ChildText $sq 'displayname' }
+                if (-not $viewName) { $viewName = '(unnamed)' }
+                $isDefault = Get-ChildText $sq 'isdefault'
+                $layoutCols = New-Object System.Collections.ArrayList
+                $layout = $sq.SelectSingleNode("layoutxml")
+                if ($layout) {
+                    foreach ($cell in $layout.SelectNodes(".//cell")) {
+                        $nm = Get-Attr $cell 'name'
+                        if ($nm) { [void]$layoutCols.Add($nm) }
+                    }
+                }
+                $sortText = ''
+                $filterText = ''
+                $fetch = $sq.SelectSingleNode("fetchxml")
+                if ($fetch) {
+                    $fx = $null
+                    try { $fx = [xml]$fetch.InnerText } catch { $fx = $null }
+                    if ($fx) {
+                        $orders = New-Object System.Collections.ArrayList
+                        foreach ($o in $fx.SelectNodes("//order")) {
+                            $oa = Get-Attr $o 'attribute'
+                            $desc = Get-Attr $o 'descending'
+                            $dir = if ($desc -eq 'true') { 'desc' } else { 'asc' }
+                            if ($oa) { [void]$orders.Add("$oa $dir") }
+                        }
+                        $sortText = ($orders -join '; ')
+                        $conds = New-Object System.Collections.ArrayList
+                        foreach ($c in $fx.SelectNodes("//condition")) {
+                            $ca = Get-Attr $c 'attribute'
+                            $cop = Get-Attr $c 'operator'
+                            $cv = Get-Attr $c 'value'
+                            $seg = "$ca $cop"
+                            if ($cv) { $seg = "$seg $cv" }
+                            [void]$conds.Add($seg.Trim())
+                        }
+                        $filterText = ($conds -join ' AND ')
+                    }
+                }
+                [void]$views.Add([pscustomobject]@{
+                    Table=$table; View=$viewName; IsDefault=$isDefault
+                    Columns=($layoutCols -join ', '); Sort=$sortText; Filter=$filterText
+                })
+            }
+        }
+    }
+    return [pscustomobject]@{ Forms=$forms; Views=$views }
+}
 
-**If TRUE:**
+function Parse-TopicYaml {
+    param([string]$Name,[string]$ComponentType,[string[]]$Lines,[int]$LineCap)
+    $displayName = $Name
+    for ($i=0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match '^\s*displayName:\s*(.+)$') { $displayName = $matches[1].Trim().Trim('"').Trim("'"); break }
+    }
+    $triggers = New-Object System.Collections.ArrayList
+    for ($i=0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match '^\s*triggerQueries:\s*$') {
+            for ($j=$i+1; $j -lt $Lines.Count; $j++) {
+                if ($Lines[$j] -match '^\s*-\s*(.+)$') { [void]$triggers.Add(($matches[1].Trim().Trim('"').Trim("'"))) }
+                elseif ($Lines[$j] -match '^\s*$') { continue } else { break }
+            }
+        }
+    }
+    $knowledge = New-Object System.Collections.ArrayList
+    for ($i=0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match '(?i)(knowledgeSources|searchEnabled|dataSource|sharePointSearch|publicWebSearch|connectionReference|environmentVariable)') { [void]$knowledge.Add($Lines[$i].Trim()) }
+    }
+    $raw = if ($Lines.Count -gt $LineCap) { ($Lines[0..($LineCap-1)] -join "`r`n") + "`r`n... [truncated $($Lines.Count - $LineCap) lines]" } else { ($Lines -join "`r`n") }
+    return [pscustomobject]@{ Name=$Name; ComponentType=$ComponentType; DisplayName=$displayName; Triggers=$triggers; Knowledge=$knowledge; Raw=$raw }
+}
 
-```
-Step D1 — SharePoint: Update file properties (Library 1)
-  Pipeline_Status: Needs Review
-  AI_Confidence: Low
-  AI_Confidence_Reason: [varConfidenceReason]
+function Read-Bots {
+    param([string]$Root,$Cust,[int]$LineCap)
+    $bots = New-Object System.Collections.ArrayList
+    $bcDir = Join-Path $Root 'botcomponents'
+    if (Test-Path $bcDir) {
+        foreach ($compDir in Get-ChildItem -Path $bcDir -Directory) {
+            $dataFile = Join-Path $compDir.FullName 'data'
+            $metaFile = Join-Path $compDir.FullName 'botcomponent.xml'
+            if (-not (Test-Path $dataFile)) { continue }
+            $compType = ''
+            $meta = Get-Xml $metaFile
+            if ($meta) {
+                $ct = $meta.SelectSingleNode("//componenttype")
+                if ($ct) { $compType = $ct.InnerText }
+                if (-not $compType) { $ct2 = $meta.SelectSingleNode("//ComponentType"); if ($ct2) { $compType = $ct2.InnerText } }
+            }
+            $namePart = $compDir.Name
+            $shortName = $namePart -replace '^.*\.topic\.','' -replace '^.*\.gpt\.',''
+            $lines = Get-Content -Path $dataFile -Encoding UTF8
+            [void]$bots.Add((Parse-TopicYaml -Name $shortName -ComponentType $compType -Lines $lines -LineCap $LineCap))
+        }
+    }
+    if ($bots.Count -eq 0) {
+        foreach ($f in Get-ChildItem -Path $Root -Recurse -Include *.yaml,*.yml -ErrorAction SilentlyContinue) {
+            $lines = Get-Content -Path $f.FullName -Encoding UTF8
+            [void]$bots.Add((Parse-TopicYaml -Name ($f.BaseName -replace '\.topic$','') -ComponentType '' -Lines $lines -LineCap $LineCap))
+        }
+    }
+    return $bots
+}
 
-Step D2 — Office 365 Outlook: Send an email
-  To: [Document_Owner from trigger]
-  CC: HR Admin mailbox
-  Subject: Document requires review before publishing
+function Read-BotConfig {
+    param([string]$Root)
+    $info = [ordered]@{ Name=''; Instructions=''; ConfigFile='' }
+    $botsDir = Join-Path $Root 'bots'
+    if (-not (Test-Path $botsDir)) { return $info }
+    foreach ($botDir in Get-ChildItem -Path $botsDir -Directory) {
+        $info.Name = $botDir.Name
+        $botXml = Get-Xml (Join-Path $botDir.FullName 'bot.xml')
+        if ($botXml) {
+            $inst = $botXml.SelectSingleNode("//instructions")
+            if ($inst) { $info.Instructions = $inst.InnerText }
+        }
+        $info.ConfigFile = (Join-Path $botDir.FullName 'configuration.json')
+        break
+    }
+    return $info
+}
+
+function Read-Inventory {
+    param([string]$Root,$Sol,$Cust)
+    $man = if ($Sol) { $Sol.SelectSingleNode("//SolutionManifest") } else { $null }
+    $pub = if ($man) { $man.SelectSingleNode("Publisher") } else { $null }
+    $inv = [ordered]@{
+        UniqueName = if ($man) { Get-ChildText $man 'UniqueName' } else { '' }
+        Version    = if ($man) { Get-ChildText $man 'Version' } else { '' }
+        Managed    = if ($man) { Get-ChildText $man 'Managed' } else { '' }
+        Publisher  = if ($pub) { Get-ChildText $pub 'UniqueName' } else { '' }
+        Prefix     = if ($pub) { Get-ChildText $pub 'CustomizationPrefix' } else { '' }
+    }
+    $inv.GlobalChoiceCount  = if ($Cust) { $Cust.SelectNodes("//optionsets/optionset").Count } else { 0 }
+    $inv.ConnectionRefCount = if ($Cust) { $Cust.SelectNodes("//connectionreferences/connectionreference").Count } else { 0 }
+    $inv.EnvVariableCount   = if ($Cust) { $Cust.SelectNodes("//environmentvariabledefinitions/environmentvariabledefinition").Count } else { 0 }
+    $inv.WorkflowCount      = if ($Cust) { $Cust.SelectNodes("//Workflows/Workflow").Count } else { 0 }
+    return $inv
+}
+
+if (-not (Test-Path $UnpackedFolder)) { throw "UnpackedFolder not found: $UnpackedFolder" }
+$root = (Resolve-Path $UnpackedFolder).Path
+if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
+$OutputFolder = (Resolve-Path $OutputFolder).Path
+Write-Host "Source root: $root"
+
+$solPath = Find-File $root @('solution.xml','Other\Solution.xml')
+$custPath = Find-File $root @('customizations.xml','Other\Customizations.xml')
+$sol = Get-Xml $solPath
+$cust = Get-Xml $custPath
+
+$entityEls = @(Get-EntityElements -Root $root -Cust $cust)
+$entityResults = New-Object System.Collections.ArrayList
+$tables = New-Object System.Collections.ArrayList
+$columns = New-Object System.Collections.ArrayList
+foreach ($el in $entityEls) {
+    $parsed = Parse-Entity $el
+    if (-not $parsed) { continue }
+    [void]$entityResults.Add($parsed)
+    [void]$tables.Add([pscustomobject]@{ Logical=$parsed.Logical; Display=$parsed.Display; Columns=$parsed.Columns.Count })
+    foreach ($c in $parsed.Columns) { [void]$columns.Add($c) }
+}
+
+$rels = @(Read-Relationships -Root $root -Cust $cust)
+$apps = @(Read-AppModules -Root $root -Cust $cust)
+$maps = @(Read-SiteMaps -Root $root -Cust $cust)
+$fv   = Read-FormsAndViews -EntityResults $entityResults
+$forms = @($fv.Forms)
+$views = @($fv.Views)
+$bots = @(Read-Bots -Root $root -Cust $cust -LineCap $RawYamlLineCap)
+$botCfg = Read-BotConfig -Root $root
+$inv = Read-Inventory -Root $root -Sol $sol -Cust $cust
+
+Write-Host ("Parsed: {0} tables, {1} columns, {2} relationships, {3} forms rows, {4} views, {5} apps, {6} sitemaps, {7} agent topics" -f $tables.Count,$columns.Count,$rels.Count,$forms.Count,$views.Count,$apps.Count,$maps.Count,$bots.Count)
+
+
+$xlsxPath  = Join-Path $OutputFolder 'DataDictionary.xlsx'
+$invDocx   = Join-Path $OutputFolder 'ComponentInventory.docx'
+$mdaDocx   = Join-Path $OutputFolder 'MDA_Specification.docx'
+$agentDocx = Join-Path $OutputFolder 'AgentDesign.docx'
+
+$xlOpenXMLWorkbook = 51
+$wdFormatDocx = 16
+$wdHeading1 = -2
+$wdHeading2 = -3
+$wdHeading3 = -4
+$wdTitle    = -63
+$wdNormal   = -1
+
+function Release-Com { param($Obj) if ($null -ne $Obj) { try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($Obj) } catch {} } }
+
+function Write-Sheet {
+    param($Workbook,[string]$Name,[string[]]$Headers,$Rows,[int]$Index)
+    if ($Index -eq 1) { $ws = $Workbook.Worksheets.Item(1) } else { $ws = $Workbook.Worksheets.Add([System.Reflection.Missing]::Value, $Workbook.Worksheets.Item($Workbook.Worksheets.Count)) }
+    $ws.Name = $Name
+    for ($c=0; $c -lt $Headers.Count; $c++) { $ws.Cells.Item(1,$c+1).Value2 = $Headers[$c] }
+    $r = 2
+    foreach ($row in $Rows) {
+        for ($c=0; $c -lt $Headers.Count; $c++) {
+            $val = $row[$c]
+            if ($null -eq $val) { $val = '' }
+            $ws.Cells.Item($r,$c+1).Value2 = [string]$val
+        }
+        $r++
+    }
+    $ws.Rows.Item(1).Font.Bold = $true
+    $used = $ws.UsedRange
+    $used.Columns.AutoFit() | Out-Null
+    foreach ($col in $used.Columns) { if ($col.ColumnWidth -gt 80) { $col.ColumnWidth = 80 } }
+    Release-Com $used
+    Release-Com $ws
+}
+
+$excel = $null; $wb = $null
+try {
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+    $wb = $excel.Workbooks.Add()
+    while ($wb.Worksheets.Count -gt 1) { $wb.Worksheets.Item($wb.Worksheets.Count).Delete() }
+
+    $tableRows = @(); foreach ($t in $tables) { $tableRows += ,@($t.Logical,$t.Display,$t.Columns) }
+    Write-Sheet -Workbook $wb -Name 'Tables' -Headers @('Logical','Display','Columns') -Rows $tableRows -Index 1
+
+    $colRows = @(); foreach ($c in $columns) { $colRows += ,@($c.Table,$c.Logical,$c.Display,$c.Type,$c.Required,$c.Choices) }
+    Write-Sheet -Workbook $wb -Name 'Columns' -Headers @('Table','Column Logical','Column Display','Type','Required','Choices') -Rows $colRows -Index 2
+
+    $relRows = @(); foreach ($r in $rels) { $relRows += ,@($r.Name,$r.Type,$r.Referencing,$r.Referenced,$r.ViaAttribute) }
+    Write-Sheet -Workbook $wb -Name 'Relationships' -Headers @('Name','Type','Referencing / First','Referenced / Second','Via Attribute') -Rows $relRows -Index 3
+
+    $formRows = @(); foreach ($f in $forms) { $formRows += ,@($f.Table,$f.Form,$f.Type,$f.Tab,$f.Section,$f.Field) }
+    Write-Sheet -Workbook $wb -Name 'Forms' -Headers @('Table','Form','Type','Tab','Section','Field') -Rows $formRows -Index 4
+
+    $viewRows = @(); foreach ($v in $views) { $viewRows += ,@($v.Table,$v.View,$v.IsDefault,$v.Columns,$v.Sort,$v.Filter) }
+    Write-Sheet -Workbook $wb -Name 'Views' -Headers @('Table','View','IsDefault','Columns','Sort','Filter') -Rows $viewRows -Index 5
+
+    $wb.Worksheets.Item(1).Activate()
+    if (Test-Path $xlsxPath) { Remove-Item $xlsxPath -Force }
+    $wb.SaveAs($xlsxPath, $xlOpenXMLWorkbook)
+    $wb.Close($false)
+} finally {
+    if ($excel) { $excel.Quit() }
+    Release-Com $wb
+    Release-Com $excel
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+}
+Write-Host "Wrote $xlsxPath"
+
+$word = $null
+try {
+    $word = New-Object -ComObject Word.Application
+    $word.Visible = $false
+
+    function New-Doc { $script:Doc = $word.Documents.Add(); $script:Sel = $word.Selection }
+    function W-Title($txt) { $script:Sel.Style = $script:Doc.Styles.Item($wdTitle); $script:Sel.TypeText([string]$txt); $script:Sel.TypeParagraph() }
+    function W-H($lvl,$txt) { $script:Sel.Style = $script:Doc.Styles.Item($lvl); $script:Sel.TypeText([string]$txt); $script:Sel.TypeParagraph() }
+    function W-P($txt) { $script:Sel.Style = $script:Doc.Styles.Item($wdNormal); $script:Sel.TypeText([string]$txt); $script:Sel.TypeParagraph() }
+    function W-Code($txt) {
+        $script:Sel.Style = $script:Doc.Styles.Item($wdNormal)
+        $script:Sel.Font.Name = 'Consolas'; $script:Sel.Font.Size = 8
+        foreach ($line in ([string]$txt -split "`r?`n")) { $script:Sel.TypeText($line); $script:Sel.TypeParagraph() }
+        $script:Sel.Font.Name = 'Calibri'; $script:Sel.Font.Size = 11
+    }
+    function Save-Doc($path) { if (Test-Path $path) { Remove-Item $path -Force }; $script:Doc.SaveAs2($path, $wdFormatDocx); $script:Doc.Close() }
+
+    New-Doc
+    W-Title 'Solution Component Inventory'
+    W-H $wdHeading1 'Solution'
+    W-P ("Unique name: " + $inv.UniqueName)
+    W-P ("Version: " + $inv.Version)
+    W-P ("Publisher: " + $inv.Publisher + "  (prefix: " + $inv.Prefix + ")")
+    W-P ("Managed: " + $inv.Managed)
+    W-H $wdHeading1 'Component counts'
+    W-P ("Tables: " + $tables.Count)
+    W-P ("Forms (rows): " + $forms.Count)
+    W-P ("Views: " + $views.Count)
+    W-P ("Model-driven apps: " + $apps.Count)
+    W-P ("Site maps: " + $maps.Count)
+    W-P ("Agent topics: " + $bots.Count)
+    W-P ("Cloud flows / workflows: " + $inv.WorkflowCount)
+    W-P ("Global choices: " + $inv.GlobalChoiceCount)
+    W-P ("Connection references: " + $inv.ConnectionRefCount)
+    W-P ("Environment variables: " + $inv.EnvVariableCount)
+    W-H $wdHeading1 'Tables'
+    if ($tables.Count -eq 0) { W-P 'None found.' }
+    foreach ($t in $tables) { W-P ("- " + $t.Display + "  (" + $t.Logical + ", " + $t.Columns + " columns)") }
+    W-H $wdHeading1 'Model-driven apps'
+    if ($apps.Count -eq 0) { W-P 'None found.' }
+    foreach ($a in $apps) { W-P ("- " + $a.Display + "  (" + $a.Unique + ")") }
+    W-H $wdHeading1 'Agents'
+    if ($botCfg.Name) { W-P ("Bot: " + $botCfg.Name) }
+    if ($bots.Count -eq 0) { W-P 'No topics found.' }
+    foreach ($b in $bots) { W-P ("- " + $b.DisplayName + "  [" + $b.ComponentType + "]") }
+    Save-Doc $invDocx
+    Write-Host "Wrote $invDocx"
+
+    New-Doc
+    W-Title 'Model-Driven App Specification'
+    W-H $wdHeading1 'Apps'
+    if ($apps.Count -eq 0) { W-P 'No model-driven apps found in this solution.' }
+    foreach ($a in $apps) { W-P ("- " + $a.Display + "  (" + $a.Unique + ")") }
+    W-H $wdHeading1 'Site maps'
+    if ($maps.Count -eq 0) { W-P 'No site maps found.' }
+    $surfaced = New-Object System.Collections.ArrayList
+    foreach ($m in $maps) {
+        W-H $wdHeading2 ("Site map: " + $m.Name)
+        foreach ($area in $m.Areas) {
+            W-H $wdHeading3 ("Area: " + $area.Title)
+            foreach ($grp in $area.Groups) {
+                W-P ("  Group: " + $grp.Title)
+                foreach ($sa in $grp.SubAreas) {
+                    $label = $sa.Title; if (-not $label) { $label = $sa.Entity }
+                    $target = if ($sa.Entity) { "table: " + $sa.Entity } elseif ($sa.Url) { "url: " + $sa.Url } else { '' }
+                    W-P ("    - " + $label + "  (" + $target + ")")
+                    if ($sa.Entity -and -not $surfaced.Contains($sa.Entity)) { [void]$surfaced.Add($sa.Entity) }
+                }
+            }
+        }
+    }
+    W-H $wdHeading1 'Tables surfaced across all site maps'
+    if ($surfaced.Count -eq 0) { W-P 'None resolved.' }
+    foreach ($e in $surfaced) { W-P ("- " + $e) }
+    W-H $wdHeading1 'Views by table (per-location filters live here)'
+    if ($views.Count -eq 0) { W-P 'No views found.' }
+    $viewsByTable = $views | Group-Object Table
+    foreach ($g in $viewsByTable) {
+        W-H $wdHeading2 ("Table: " + $g.Name)
+        foreach ($v in $g.Group) {
+            $def = if ($v.IsDefault -eq '1') { ' [default]' } else { '' }
+            W-P ("- " + $v.View + $def)
+            if ($v.Filter) { W-P ("    filter: " + $v.Filter) }
+            if ($v.Sort) { W-P ("    sort: " + $v.Sort) }
+            if ($v.Columns) { W-P ("    columns: " + $v.Columns) }
+        }
+    }
+    Save-Doc $mdaDocx
+    Write-Host "Wrote $mdaDocx"
+
+    New-Doc
+    W-Title 'Agent Design'
+    if ($botCfg.Name) { W-P ("Bot: " + $botCfg.Name) }
+    if ($botCfg.Instructions) {
+        W-H $wdHeading1 'System instructions'
+        W-Code $botCfg.Instructions
+    }
+    foreach ($b in $bots) {
+        W-H $wdHeading1 ("Topic: " + $b.DisplayName)
+        if ($b.ComponentType) { W-P ("Component type: " + $b.ComponentType) }
+        W-H $wdHeading2 'Trigger phrases'
+        if ($b.Triggers.Count -eq 0) { W-P 'None detected.' }
+        foreach ($t in $b.Triggers) { W-P ("- " + $t) }
+        if ($b.Knowledge.Count -gt 0) {
+            W-H $wdHeading2 'Knowledge / search / binding references'
+            foreach ($k in $b.Knowledge) { W-P ("- " + $k) }
+        }
+        W-H $wdHeading2 'Raw topic definition'
+        W-Code $b.Raw
+    }
+    Save-Doc $agentDocx
+    Write-Host "Wrote $agentDocx"
+} finally {
+    if ($word) { $word.Quit() }
+    Release-Com $word
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+}
+
+Write-Host ''
+Write-Host 'Done. Add these to your Copilot Notebook:'
+Write-Host "  $xlsxPath"
+Write-Host "  $invDocx"
+Write-Host "  $mdaDocx"
+Write-Host "  $agentDocx"
