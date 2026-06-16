@@ -96,7 +96,7 @@ function Get-EntityElements {
     } elseif ($Cust) {
         foreach ($e in $Cust.DocumentElement.SelectNodes("Entities/Entity")) { [void]$els.Add($e) }
     }
-    return ,$els
+    return $els
 }
 
 function Read-Relationships {
@@ -122,7 +122,7 @@ function Read-Relationships {
             }
         }
     }
-    return ,$rels
+    return $rels
 }
 
 function Read-AppModules {
@@ -148,7 +148,7 @@ function Read-AppModules {
         if (-not $display) { $display = $unique }
         [void]$apps.Add([pscustomobject]@{ Unique=$unique; Display=$display })
     }
-    return ,$apps
+    return $apps
 }
 
 function Parse-SiteMapNode {
@@ -202,7 +202,7 @@ function Read-SiteMaps {
             if ($sm.SelectNodes(".//Area").Count -gt 0) { $i++; [void]$maps.Add((Parse-SiteMapNode -Container $sm -Name ("sitemap_$i"))) }
         }
     }
-    return ,$maps
+    return $maps
 }
 
 function Read-FormsAndViews {
@@ -348,7 +348,7 @@ function Read-Bots {
             [void]$bots.Add((Parse-TopicYaml -Name ($f.BaseName -replace '\.topic$','') -ComponentType '' -Lines $lines -LineCap $LineCap))
         }
     }
-    return ,$bots
+    return $bots
 }
 
 function Read-BotConfig {
