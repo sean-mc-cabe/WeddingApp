@@ -316,8 +316,36 @@ function Parse-TopicYaml {
     for ($i=0; $i -lt $Lines.Count; $i++) {
         if ($Lines[$i] -match '(?i)(knowledgeSources|searchEnabled|dataSource|sharePointSearch|publicWebSearch|connectionReference|environmentVariable)') { [void]$knowledge.Add($Lines[$i].Trim()) }
     }
-    $raw = if ($Lines.Count -gt $LineCap) { ($Lines[0..($LineCap-1)] -join "`r`n") + "`r`n... [truncated $($Lines.Count - $LineCap) lines]" } else { ($Lines -join "`r`n") }
-    return [pscustomobject]@{ Name=$Name; ComponentType=$ComponentType; DisplayName=$displayName; Triggers=$triggers; Knowledge=$knowledge; Raw=$raw }
+    $globalsSet = New-Object System.Collections.ArrayList
+    $globalsRead = New-Object System.Collections.ArrayList
+    $topicVarsSet = New-Object System.Collections.ArrayList
+    $actions = New-Object System.Collections.ArrayList
+    for ($i=0; $i -lt $Lines.Count; $i++) {
+        $line = $Lines[$i]
+        if ($line -match '^\s*(variable|property):\s*(Global\.[A-Za-z0-9_]+)') {
+            $g = $matches[2] -replace '^Global\.',''
+            if (-not $globalsSet.Contains($g)) { [void]$globalsSet.Add($g) }
+        }
+        if ($line -match '^\s*(variable|property):\s*(Topic\.[A-Za-z0-9_]+)') {
+            $tv = $matches[2] -replace '^Topic\.',''
+            if (-not $topicVarsSet.Contains($tv)) { [void]$topicVarsSet.Add($tv) }
+        }
+        foreach ($m in [regex]::Matches($line,'Global\.([A-Za-z0-9_]+)')) {
+            $g = $m.Groups[1].Value
+            if (-not $globalsRead.Contains($g)) { [void]$globalsRead.Add($g) }
+        }
+        if ($line -match '^\s*kind:\s*(SetVariable|SetTextVariable|SetMultipleVariables|InvokeConnectorAction|InvokeFlowAction|BeginDialog|SearchAndSummarizeContent|AdaptiveCardPrompt|Question|HttpRequestAction|GotoAction)\b') {
+            [void]$actions.Add($matches[1])
+        }
+    }
+    foreach ($g in $globalsSet) { if ($globalsRead.Contains($g)) { [void]$globalsRead.Remove($g) } }
+    $rawCapped = if ($Lines.Count -gt $LineCap) { ($Lines[0..($LineCap-1)] -join "`r`n") + "`r`n... [truncated $($Lines.Count - $LineCap) lines]" } else { ($Lines -join "`r`n") }
+    return [pscustomobject]@{
+        Name=$Name; ComponentType=$ComponentType; DisplayName=$displayName
+        Triggers=$triggers; Knowledge=$knowledge
+        GlobalsSet=$globalsSet; GlobalsRead=$globalsRead; TopicVarsSet=$topicVarsSet; Actions=$actions
+        LineCount=$Lines.Count; Raw=($Lines -join "`r`n"); RawCapped=$rawCapped
+    }
 }
 
 function Read-Bots {
@@ -483,6 +511,24 @@ try {
     $viewRows = @(); foreach ($v in $views) { $viewRows += ,@($v.Table,$v.View,$v.IsDefault,$v.Columns,$v.Sort,$v.Filter) }
     Write-Sheet -Workbook $wb -Name 'Views' -Headers @('Table','View','IsDefault','Columns','Sort','Filter') -Rows $viewRows -Index 5
 
+    $topicRows = @()
+    foreach ($b in $bots) {
+        $yaml = $b.Raw
+        if ($yaml.Length -gt 32000) { $yaml = $yaml.Substring(0,32000) + "`r`n... [truncated; full body exceeds Excel cell limit]" }
+        $topicRows += ,@(
+            $b.DisplayName, $b.ComponentType,
+            ($b.Triggers -join ' | '),
+            ($b.GlobalsSet -join ', '),
+            ($b.GlobalsRead -join ', '),
+            ($b.TopicVarsSet -join ', '),
+            (($b.Actions | Select-Object -Unique) -join ', '),
+            ($b.Knowledge -join ' | '),
+            $b.LineCount,
+            $yaml
+        )
+    }
+    Write-Sheet -Workbook $wb -Name 'Topics' -Headers @('Topic','Type','Triggers','Globals Set','Globals Read','Topic Vars Set','Action Kinds','Knowledge Refs','Lines','Full YAML') -Rows $topicRows -Index 6
+
     $wb.Worksheets.Item(1).Activate()
     if (Test-Path $xlsxPath) { Remove-Item $xlsxPath -Force }
     $wb.SaveAs($xlsxPath, $xlOpenXMLWorkbook)
@@ -592,18 +638,49 @@ try {
         W-H $wdHeading1 'System instructions'
         W-Code $botCfg.Instructions
     }
+    $globalSetMap = @{}
+    $globalReadMap = @{}
+    foreach ($b in $bots) {
+        foreach ($g in $b.GlobalsSet) { if (-not $globalSetMap.ContainsKey($g)) { $globalSetMap[$g] = New-Object System.Collections.ArrayList }; [void]$globalSetMap[$g].Add($b.DisplayName) }
+        foreach ($g in $b.GlobalsRead) { if (-not $globalReadMap.ContainsKey($g)) { $globalReadMap[$g] = New-Object System.Collections.ArrayList }; [void]$globalReadMap[$g].Add($b.DisplayName) }
+    }
+    $allGlobals = @($globalSetMap.Keys + $globalReadMap.Keys | Select-Object -Unique | Sort-Object)
+    if ($allGlobals.Count -gt 0) {
+        W-H $wdHeading1 'Global variables cross-reference'
+        foreach ($g in $allGlobals) {
+            W-H $wdHeading3 ("Global." + $g)
+            $setBy = if ($globalSetMap.ContainsKey($g)) { ($globalSetMap[$g] | Select-Object -Unique) -join ', ' } else { '(not set in any topic)' }
+            $readBy = if ($globalReadMap.ContainsKey($g)) { ($globalReadMap[$g] | Select-Object -Unique) -join ', ' } else { '(not read)' }
+            W-P ("Set by: " + $setBy)
+            W-P ("Read by: " + $readBy)
+        }
+    }
     foreach ($b in $bots) {
         W-H $wdHeading1 ("Topic: " + $b.DisplayName)
-        if ($b.ComponentType) { W-P ("Component type: " + $b.ComponentType) }
+        if ($b.ComponentType) { W-P ("Component type: " + $b.ComponentType + "    (" + $b.LineCount + " lines of YAML; full body in DataDictionary.xlsx > Topics)") }
         W-H $wdHeading2 'Trigger phrases'
         if ($b.Triggers.Count -eq 0) { W-P 'None detected.' }
         foreach ($t in $b.Triggers) { W-P ("- " + $t) }
+        if ($b.GlobalsSet.Count -gt 0) {
+            W-H $wdHeading2 'Global variables set here'
+            foreach ($g in $b.GlobalsSet) { W-P ("- Global." + $g) }
+        }
+        if ($b.GlobalsRead.Count -gt 0) {
+            W-H $wdHeading2 'Global variables read (set elsewhere)'
+            foreach ($g in $b.GlobalsRead) { W-P ("- Global." + $g) }
+        }
+        if ($b.TopicVarsSet.Count -gt 0) {
+            W-H $wdHeading2 'Topic variables set'
+            foreach ($tv in $b.TopicVarsSet) { W-P ("- Topic." + $tv) }
+        }
+        if ($b.Actions.Count -gt 0) {
+            W-H $wdHeading2 'Action kinds used'
+            foreach ($act in ($b.Actions | Select-Object -Unique)) { W-P ("- " + $act) }
+        }
         if ($b.Knowledge.Count -gt 0) {
             W-H $wdHeading2 'Knowledge / search / binding references'
             foreach ($k in $b.Knowledge) { W-P ("- " + $k) }
         }
-        W-H $wdHeading2 'Raw topic definition'
-        W-Code $b.Raw
     }
     Save-Doc $agentDocx
     Write-Host "Wrote $agentDocx"
