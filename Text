@@ -1,3 +1,6 @@
+Get-ChildItem "C:\Users\MCCABES\Downloads\AskHRMultiLocation\bots","C:\Users\MCCABES\Downloads\AskHRMultiLocation\botcomponents" -Recurse | Select-Object FullName, Length
+([xml](Get-Content "C:\Users\MCCABES\Downloads\AskHRMultiLocation\customizations.xml" -Raw)).DocumentElement.ChildNodes | Select-Object Name -Unique
+
 #requires -Version 5.1
 [CmdletBinding()]
 param(
