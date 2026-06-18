@@ -1,16 +1,12 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param(
-    [Parameter(Mandatory=$true)]
-    [string]$UnpackedFolder,
+param()
 
-    [Parameter(Mandatory=$true)]
-    [string]$OutputFolder,
-
-    [int]$RawYamlLineCap = 400
-)
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
 $ErrorActionPreference = 'Stop'
+
 
 function Get-Xml {
     param([string]$Path)
@@ -397,6 +393,97 @@ function Read-BotConfig {
     return $info
 }
 
+function Read-Flows {
+    param([string]$Root,$Cust)
+    $flows = New-Object System.Collections.ArrayList
+    $wfDir = Join-Path $Root 'Workflows'
+    if (-not (Test-Path $wfDir)) { return $flows }
+
+    $catMap = @{ '0'='Classic workflow'; '1'='Dialog'; '2'='Business rule'; '3'='Action'; '4'='Business process flow'; '5'='Cloud flow'; '6'='Desktop flow' }
+
+    $xmlFiles = Get-ChildItem -Path $wfDir -Filter *.xml -ErrorAction SilentlyContinue
+    foreach ($xmlFile in $xmlFiles) {
+        $wf = Get-Xml $xmlFile.FullName
+        if (-not $wf) { continue }
+        $wfEl = $wf.SelectSingleNode("//Workflow")
+        if (-not $wfEl) { $wfEl = $wf.DocumentElement }
+        $name = Get-Attr $wfEl 'Name'
+        if (-not $name) { $name = Get-ChildText $wfEl 'Name' }
+        if (-not $name) { $name = $xmlFile.BaseName }
+        $catCode = Get-Attr $wfEl 'Category'
+        if (-not $catCode) { $catCode = Get-ChildText $wfEl 'Category' }
+        $category = if ($catCode -and $catMap.ContainsKey([string]$catCode)) { $catMap[[string]$catCode] } elseif ($catCode) { "category $catCode" } else { '' }
+        $stateCode = Get-Attr $wfEl 'StateCode'
+        if (-not $stateCode) { $stateCode = Get-ChildText $wfEl 'StateCode' }
+        $state = switch ([string]$stateCode) { '0' { 'Draft' } '1' { 'Activated' } '2' { 'Suspended' } default { $stateCode } }
+
+        $jsonPath = Join-Path $wfDir ($xmlFile.BaseName + '.json')
+        if (-not (Test-Path $jsonPath)) {
+            $alt = Get-ChildItem -Path $wfDir -Filter ($xmlFile.BaseName + '*.json') -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($alt) { $jsonPath = $alt.FullName }
+        }
+
+        $trigger = ''
+        $actionList = New-Object System.Collections.ArrayList
+        $connRefs = New-Object System.Collections.ArrayList
+        $envVars = New-Object System.Collections.ArrayList
+        if (Test-Path $jsonPath) {
+            $jsonRaw = Get-Content -Path $jsonPath -Raw -Encoding UTF8
+            $cd = $null
+            try { $cd = $jsonRaw | ConvertFrom-Json } catch { $cd = $null }
+            if ($cd) {
+                $def = $null
+                if ($cd.properties -and $cd.properties.definition) { $def = $cd.properties.definition }
+                elseif ($cd.definition) { $def = $cd.definition }
+                if ($def) {
+                    if ($def.triggers) {
+                        foreach ($tp in $def.triggers.PSObject.Properties) {
+                            $tk = $tp.Value.type
+                            $tkind = $tk
+                            if ($tp.Value.inputs -and $tp.Value.inputs.host -and $tp.Value.inputs.host.operationId) { $tkind = "$tk : " + $tp.Value.inputs.host.operationId }
+                            elseif ($tp.Value.kind) { $tkind = "$tk ($($tp.Value.kind))" }
+                            $trigger = ($tp.Name + " [" + $tkind + "]")
+                            break
+                        }
+                    }
+                    if ($def.actions) {
+                        foreach ($ap in $def.actions.PSObject.Properties) {
+                            $atype = $ap.Value.type
+                            $op = ''
+                            if ($ap.Value.inputs -and $ap.Value.inputs.host) {
+                                $h = $ap.Value.inputs.host
+                                if ($h.operationId) { $op = $h.operationId }
+                                if ($h.connectionName) { $cn = $h.connectionName; if (-not $connRefs.Contains($cn)) { [void]$connRefs.Add($cn) } }
+                                if ($h.apiId) { $op = ($h.apiId -replace '^.*/','') + (if ($op) { " / $op" } else { '' }) }
+                            }
+                            $label = $ap.Name + " (" + $atype + (if ($op) { ": $op" } else { '' }) + ")"
+                            [void]$actionList.Add($label)
+                        }
+                    }
+                }
+                if ($cd.properties -and $cd.properties.connectionReferences) {
+                    foreach ($cr in $cd.properties.connectionReferences.PSObject.Properties) {
+                        $crName = $cr.Value.connection.connectionReferenceLogicalName
+                        if (-not $crName) { $crName = $cr.Name }
+                        if ($crName -and -not $connRefs.Contains($crName)) { [void]$connRefs.Add($crName) }
+                    }
+                }
+            }
+            foreach ($m in [regex]::Matches($jsonRaw,'@parameters\(''([A-Za-z0-9_]+)''\)')) {
+                $ev = $m.Groups[1].Value
+                if (-not $envVars.Contains($ev)) { [void]$envVars.Add($ev) }
+            }
+        }
+
+        [void]$flows.Add([pscustomobject]@{
+            Name=$name; Category=$category; State=$state; Trigger=$trigger
+            ActionCount=$actionList.Count; Actions=$actionList
+            ConnectionRefs=$connRefs; EnvVariables=$envVars
+        })
+    }
+    return $flows
+}
+
 function Read-Inventory {
     param([string]$Root,$Sol,$Cust)
     $man = if ($Sol) { $Sol.SelectSingleNode("//SolutionManifest") } else { $null }
@@ -415,229 +502,233 @@ function Read-Inventory {
     return $inv
 }
 
-if (-not (Test-Path $UnpackedFolder)) { throw "UnpackedFolder not found: $UnpackedFolder" }
-$root = (Resolve-Path $UnpackedFolder).Path
-if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
-$OutputFolder = (Resolve-Path $OutputFolder).Path
-Write-Host "Source root: $root"
 
-$solPath = Find-File $root @('solution.xml','Other\Solution.xml')
-$custPath = Find-File $root @('customizations.xml','Other\Customizations.xml')
-$sol = Get-Xml $solPath
-$cust = Get-Xml $custPath
-
-$entityEls = @(Get-EntityElements -Root $root -Cust $cust)
-$entityResults = New-Object System.Collections.ArrayList
-$tables = New-Object System.Collections.ArrayList
-$columns = New-Object System.Collections.ArrayList
-foreach ($el in $entityEls) {
-    $parsed = Parse-Entity $el
-    if (-not $parsed) { continue }
-    [void]$entityResults.Add($parsed)
-    [void]$tables.Add([pscustomobject]@{ Logical=$parsed.Logical; Display=$parsed.Display; Columns=$parsed.Columns.Count })
-    foreach ($c in $parsed.Columns) { [void]$columns.Add($c) }
-}
-
-$rels = @(Read-Relationships -Root $root -Cust $cust)
-$apps = @(Read-AppModules -Root $root -Cust $cust)
-$maps = @(Read-SiteMaps -Root $root -Cust $cust)
-$fv   = Read-FormsAndViews -EntityResults $entityResults
-$forms = @($fv.Forms)
-$views = @($fv.Views)
-$bots = @(Read-Bots -Root $root -Cust $cust -LineCap $RawYamlLineCap)
-$botCfg = Read-BotConfig -Root $root
-$inv = Read-Inventory -Root $root -Sol $sol -Cust $cust
-
-Write-Host ("Parsed: {0} tables, {1} columns, {2} relationships, {3} forms rows, {4} views, {5} apps, {6} sitemaps, {7} agent topics" -f $tables.Count,$columns.Count,$rels.Count,$forms.Count,$views.Count,$apps.Count,$maps.Count,$bots.Count)
-
-
-$xlsxPath  = Join-Path $OutputFolder 'DataDictionary.xlsx'
-$invDocx   = Join-Path $OutputFolder 'ComponentInventory.docx'
-$mdaDocx   = Join-Path $OutputFolder 'MDA_Specification.docx'
-$agentDocx = Join-Path $OutputFolder 'AgentDesign.docx'
-
-$xlOpenXMLWorkbook = 51
-$wdFormatDocx = 16
-$wdHeading1 = -2
-$wdHeading2 = -3
-$wdHeading3 = -4
-$wdTitle    = -63
-$wdNormal   = -1
-
-function Release-Com { param($Obj) if ($null -ne $Obj) { try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($Obj) } catch {} } }
-
-function Write-Sheet {
-    param($Workbook,[string]$Name,[string[]]$Headers,$Rows,[int]$Index)
-    if ($Index -eq 1) { $ws = $Workbook.Worksheets.Item(1) } else { $ws = $Workbook.Worksheets.Add([System.Reflection.Missing]::Value, $Workbook.Worksheets.Item($Workbook.Worksheets.Count)) }
-    $ws.Name = $Name
-    for ($c=0; $c -lt $Headers.Count; $c++) { $ws.Cells.Item(1,$c+1).Value2 = $Headers[$c] }
-    $r = 2
-    foreach ($row in $Rows) {
-        for ($c=0; $c -lt $Headers.Count; $c++) {
-            $val = $row[$c]
-            if ($null -eq $val) { $val = '' }
-            $ws.Cells.Item($r,$c+1).Value2 = [string]$val
+function Invoke-Conversion {
+    param(
+        [Parameter(Mandatory=$true)][string]$UnpackedFolder,
+        [Parameter(Mandatory=$true)][string]$OutputFolder,
+        [int]$RawYamlLineCap = 400
+    )
+    if (-not (Test-Path $UnpackedFolder)) { throw "UnpackedFolder not found: $UnpackedFolder" }
+    $root = (Resolve-Path $UnpackedFolder).Path
+    if (-not (Test-Path $OutputFolder)) { New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null }
+    $OutputFolder = (Resolve-Path $OutputFolder).Path
+    Write-Host "Source root: $root"
+    
+    $solPath = Find-File $root @('solution.xml','Other\Solution.xml')
+    $custPath = Find-File $root @('customizations.xml','Other\Customizations.xml')
+    $sol = Get-Xml $solPath
+    $cust = Get-Xml $custPath
+    
+    $entityEls = @(Get-EntityElements -Root $root -Cust $cust)
+    $entityResults = New-Object System.Collections.ArrayList
+    $tables = New-Object System.Collections.ArrayList
+    $columns = New-Object System.Collections.ArrayList
+    foreach ($el in $entityEls) {
+        $parsed = Parse-Entity $el
+        if (-not $parsed) { continue }
+        [void]$entityResults.Add($parsed)
+        [void]$tables.Add([pscustomobject]@{ Logical=$parsed.Logical; Display=$parsed.Display; Columns=$parsed.Columns.Count })
+        foreach ($c in $parsed.Columns) { [void]$columns.Add($c) }
+    }
+    
+    $rels = @(Read-Relationships -Root $root -Cust $cust)
+    $apps = @(Read-AppModules -Root $root -Cust $cust)
+    $maps = @(Read-SiteMaps -Root $root -Cust $cust)
+    $fv   = Read-FormsAndViews -EntityResults $entityResults
+    $forms = @($fv.Forms)
+    $views = @($fv.Views)
+    $bots = @(Read-Bots -Root $root -Cust $cust -LineCap $RawYamlLineCap)
+    $botCfg = Read-BotConfig -Root $root
+    $flows = @(Read-Flows -Root $root -Cust $cust)
+    $inv = Read-Inventory -Root $root -Sol $sol -Cust $cust
+    
+    Write-Host ("Parsed: {0} tables, {1} columns, {2} relationships, {3} forms rows, {4} views, {5} apps, {6} sitemaps, {7} agent topics, {8} flows" -f $tables.Count,$columns.Count,$rels.Count,$forms.Count,$views.Count,$apps.Count,$maps.Count,$bots.Count,$flows.Count)
+    
+    
+    $xlsxPath  = Join-Path $OutputFolder 'DataDictionary.xlsx'
+    
+    $xlOpenXMLWorkbook = 51
+    
+    function Release-Com { param($Obj) if ($null -ne $Obj) { try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($Obj) } catch {} } }
+    
+    function Write-Sheet {
+        param($Workbook,[string]$Name,[string[]]$Headers,$Rows,[int]$Index)
+        if ($Index -eq 1) { $ws = $Workbook.Worksheets.Item(1) } else { $ws = $Workbook.Worksheets.Add([System.Reflection.Missing]::Value, $Workbook.Worksheets.Item($Workbook.Worksheets.Count)) }
+        $ws.Name = $Name
+        for ($c=0; $c -lt $Headers.Count; $c++) { $ws.Cells.Item(1,$c+1).Value2 = $Headers[$c] }
+        $r = 2
+        foreach ($row in $Rows) {
+            for ($c=0; $c -lt $Headers.Count; $c++) {
+                $val = $row[$c]
+                if ($null -eq $val) { $val = '' }
+                $ws.Cells.Item($r,$c+1).Value2 = [string]$val
+            }
+            $r++
         }
-        $r++
+        $ws.Rows.Item(1).Font.Bold = $true
+        $used = $ws.UsedRange
+        $used.Columns.AutoFit() | Out-Null
+        foreach ($col in $used.Columns) { if ($col.ColumnWidth -gt 80) { $col.ColumnWidth = 80 } }
+        Release-Com $used
+        Release-Com $ws
     }
-    $ws.Rows.Item(1).Font.Bold = $true
-    $used = $ws.UsedRange
-    $used.Columns.AutoFit() | Out-Null
-    foreach ($col in $used.Columns) { if ($col.ColumnWidth -gt 80) { $col.ColumnWidth = 80 } }
-    Release-Com $used
-    Release-Com $ws
-}
-
-$excel = $null; $wb = $null
-try {
-    $excel = New-Object -ComObject Excel.Application
-    $excel.Visible = $false
-    $excel.DisplayAlerts = $false
-    $wb = $excel.Workbooks.Add()
-    while ($wb.Worksheets.Count -gt 1) { $wb.Worksheets.Item($wb.Worksheets.Count).Delete() }
-
-    $tableRows = @(); foreach ($t in $tables) { $tableRows += ,@($t.Logical,$t.Display,$t.Columns) }
-    Write-Sheet -Workbook $wb -Name 'Tables' -Headers @('Logical','Display','Columns') -Rows $tableRows -Index 1
-
-    $colRows = @(); foreach ($c in $columns) { $colRows += ,@($c.Table,$c.Logical,$c.Display,$c.Type,$c.Required,$c.Choices) }
-    Write-Sheet -Workbook $wb -Name 'Columns' -Headers @('Table','Column Logical','Column Display','Type','Required','Choices') -Rows $colRows -Index 2
-
-    $relRows = @(); foreach ($r in $rels) { $relRows += ,@($r.Name,$r.Type,$r.Referencing,$r.Referenced,$r.ViaAttribute) }
-    Write-Sheet -Workbook $wb -Name 'Relationships' -Headers @('Name','Type','Referencing / First','Referenced / Second','Via Attribute') -Rows $relRows -Index 3
-
-    $formRows = @(); foreach ($f in $forms) { $formRows += ,@($f.Table,$f.Form,$f.Type,$f.Tab,$f.Section,$f.Field) }
-    Write-Sheet -Workbook $wb -Name 'Forms' -Headers @('Table','Form','Type','Tab','Section','Field') -Rows $formRows -Index 4
-
-    $viewRows = @(); foreach ($v in $views) { $viewRows += ,@($v.Table,$v.View,$v.IsDefault,$v.Columns,$v.Sort,$v.Filter) }
-    Write-Sheet -Workbook $wb -Name 'Views' -Headers @('Table','View','IsDefault','Columns','Sort','Filter') -Rows $viewRows -Index 5
-
-    $topicRows = @()
-    foreach ($b in $bots) {
-        $yaml = $b.Raw
-        if ($yaml.Length -gt 32000) { $yaml = $yaml.Substring(0,32000) + "`r`n... [truncated; full body exceeds Excel cell limit]" }
-        $topicRows += ,@(
-            $b.DisplayName, $b.ComponentType,
-            ($b.Triggers -join ' | '),
-            ($b.GlobalsSet -join ', '),
-            ($b.GlobalsRead -join ', '),
-            ($b.TopicVarsSet -join ', '),
-            (($b.Actions | Select-Object -Unique) -join ', '),
-            ($b.Knowledge -join ' | '),
-            $b.LineCount,
-            $yaml
-        )
+    
+    $excel = $null; $wb = $null
+    try {
+        $excel = New-Object -ComObject Excel.Application
+        $excel.Visible = $false
+        $excel.DisplayAlerts = $false
+        $wb = $excel.Workbooks.Add()
+        while ($wb.Worksheets.Count -gt 1) { $wb.Worksheets.Item($wb.Worksheets.Count).Delete() }
+    
+        $tableRows = @(); foreach ($t in $tables) { $tableRows += ,@($t.Logical,$t.Display,$t.Columns) }
+        Write-Sheet -Workbook $wb -Name 'Tables' -Headers @('Logical','Display','Columns') -Rows $tableRows -Index 1
+    
+        $colRows = @(); foreach ($c in $columns) { $colRows += ,@($c.Table,$c.Logical,$c.Display,$c.Type,$c.Required,$c.Choices) }
+        Write-Sheet -Workbook $wb -Name 'Columns' -Headers @('Table','Column Logical','Column Display','Type','Required','Choices') -Rows $colRows -Index 2
+    
+        $relRows = @(); foreach ($r in $rels) { $relRows += ,@($r.Name,$r.Type,$r.Referencing,$r.Referenced,$r.ViaAttribute) }
+        Write-Sheet -Workbook $wb -Name 'Relationships' -Headers @('Name','Type','Referencing / First','Referenced / Second','Via Attribute') -Rows $relRows -Index 3
+    
+        $formRows = @(); foreach ($f in $forms) { $formRows += ,@($f.Table,$f.Form,$f.Type,$f.Tab,$f.Section,$f.Field) }
+        Write-Sheet -Workbook $wb -Name 'Forms' -Headers @('Table','Form','Type','Tab','Section','Field') -Rows $formRows -Index 4
+    
+        $viewRows = @(); foreach ($v in $views) { $viewRows += ,@($v.Table,$v.View,$v.IsDefault,$v.Columns,$v.Sort,$v.Filter) }
+        Write-Sheet -Workbook $wb -Name 'Views' -Headers @('Table','View','IsDefault','Columns','Sort','Filter') -Rows $viewRows -Index 5
+    
+        $topicRows = @()
+        foreach ($b in $bots) {
+            $yaml = $b.Raw
+            if ($yaml.Length -gt 32000) { $yaml = $yaml.Substring(0,32000) + "`r`n... [truncated; full body exceeds Excel cell limit]" }
+            $topicRows += ,@(
+                $b.DisplayName, $b.ComponentType,
+                ($b.Triggers -join ' | '),
+                ($b.GlobalsSet -join ', '),
+                ($b.GlobalsRead -join ', '),
+                ($b.TopicVarsSet -join ', '),
+                (($b.Actions | Select-Object -Unique) -join ', '),
+                ($b.Knowledge -join ' | '),
+                $b.LineCount,
+                $yaml
+            )
+        }
+        Write-Sheet -Workbook $wb -Name 'Topics' -Headers @('Topic','Type','Triggers','Globals Set','Globals Read','Topic Vars Set','Action Kinds','Knowledge Refs','Lines','Full YAML') -Rows $topicRows -Index 6
+    
+        $flowRows = @()
+        foreach ($fl in $flows) {
+            $flowRows += ,@(
+                $fl.Name, $fl.Category, $fl.State, $fl.Trigger,
+                $fl.ActionCount,
+                ($fl.Actions -join "`r`n"),
+                ($fl.ConnectionRefs -join ', '),
+                ($fl.EnvVariables -join ', ')
+            )
+        }
+        Write-Sheet -Workbook $wb -Name 'Flows' -Headers @('Name','Category','State','Trigger','Action Count','Actions (ordered)','Connection Refs','Env Variables') -Rows $flowRows -Index 7
+    
+        $wb.Worksheets.Item(1).Activate()
+        if (Test-Path $xlsxPath) { Remove-Item $xlsxPath -Force }
+        $wb.SaveAs($xlsxPath, $xlOpenXMLWorkbook)
+        $wb.Close($false)
+    } finally {
+        if ($excel) { $excel.Quit() }
+        Release-Com $wb
+        Release-Com $excel
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
     }
-    Write-Sheet -Workbook $wb -Name 'Topics' -Headers @('Topic','Type','Triggers','Globals Set','Globals Read','Topic Vars Set','Action Kinds','Knowledge Refs','Lines','Full YAML') -Rows $topicRows -Index 6
-
-    $wb.Worksheets.Item(1).Activate()
-    if (Test-Path $xlsxPath) { Remove-Item $xlsxPath -Force }
-    $wb.SaveAs($xlsxPath, $xlOpenXMLWorkbook)
-    $wb.Close($false)
-} finally {
-    if ($excel) { $excel.Quit() }
-    Release-Com $wb
-    Release-Com $excel
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-}
-Write-Host "Wrote $xlsxPath"
-
-$word = $null
-try {
-    $word = New-Object -ComObject Word.Application
-    $word.Visible = $false
-
-    function New-Doc { $script:Doc = $word.Documents.Add(); $script:Sel = $word.Selection }
-    function W-Title($txt) { $script:Sel.Style = $script:Doc.Styles.Item($wdTitle); $script:Sel.TypeText([string]$txt); $script:Sel.TypeParagraph() }
-    function W-H($lvl,$txt) { $script:Sel.Style = $script:Doc.Styles.Item($lvl); $script:Sel.TypeText([string]$txt); $script:Sel.TypeParagraph() }
-    function W-P($txt) { $script:Sel.Style = $script:Doc.Styles.Item($wdNormal); $script:Sel.TypeText([string]$txt); $script:Sel.TypeParagraph() }
-    function W-Code($txt) {
-        $script:Sel.Style = $script:Doc.Styles.Item($wdNormal)
-        $script:Sel.Font.Name = 'Consolas'; $script:Sel.Font.Size = 8
-        foreach ($line in ([string]$txt -split "`r?`n")) { $script:Sel.TypeText($line); $script:Sel.TypeParagraph() }
-        $script:Sel.Font.Name = 'Calibri'; $script:Sel.Font.Size = 11
-    }
-    function Save-Doc($path) { if (Test-Path $path) { Remove-Item $path -Force }; $script:Doc.SaveAs2($path, $wdFormatDocx); $script:Doc.Close() }
-
-    New-Doc
-    W-Title 'Solution Component Inventory'
-    W-H $wdHeading1 'Solution'
-    W-P ("Unique name: " + $inv.UniqueName)
-    W-P ("Version: " + $inv.Version)
-    W-P ("Publisher: " + $inv.Publisher + "  (prefix: " + $inv.Prefix + ")")
-    W-P ("Managed: " + $inv.Managed)
-    W-H $wdHeading1 'Component counts'
-    W-P ("Tables: " + $tables.Count)
-    W-P ("Forms (rows): " + $forms.Count)
-    W-P ("Views: " + $views.Count)
-    W-P ("Model-driven apps: " + $apps.Count)
-    W-P ("Site maps: " + $maps.Count)
-    W-P ("Agent topics: " + $bots.Count)
-    W-P ("Cloud flows / workflows: " + $inv.WorkflowCount)
-    W-P ("Global choices: " + $inv.GlobalChoiceCount)
-    W-P ("Connection references: " + $inv.ConnectionRefCount)
-    W-P ("Environment variables: " + $inv.EnvVariableCount)
-    W-H $wdHeading1 'Tables'
-    if ($tables.Count -eq 0) { W-P 'None found.' }
-    foreach ($t in $tables) { W-P ("- " + $t.Display + "  (" + $t.Logical + ", " + $t.Columns + " columns)") }
-    W-H $wdHeading1 'Model-driven apps'
-    if ($apps.Count -eq 0) { W-P 'None found.' }
-    foreach ($a in $apps) { W-P ("- " + $a.Display + "  (" + $a.Unique + ")") }
-    W-H $wdHeading1 'Agents'
-    if ($botCfg.Name) { W-P ("Bot: " + $botCfg.Name) }
-    if ($bots.Count -eq 0) { W-P 'No topics found.' }
-    foreach ($b in $bots) { W-P ("- " + $b.DisplayName + "  [" + $b.ComponentType + "]") }
-    Save-Doc $invDocx
-    Write-Host "Wrote $invDocx"
-
-    New-Doc
-    W-Title 'Model-Driven App Specification'
-    W-H $wdHeading1 'Apps'
-    if ($apps.Count -eq 0) { W-P 'No model-driven apps found in this solution.' }
-    foreach ($a in $apps) { W-P ("- " + $a.Display + "  (" + $a.Unique + ")") }
-    W-H $wdHeading1 'Site maps'
-    if ($maps.Count -eq 0) { W-P 'No site maps found.' }
+    Write-Host "Wrote $xlsxPath"
+    
+    $txtPath = Join-Path $OutputFolder 'SolutionDesign.txt'
+    $L = New-Object System.Collections.ArrayList
+    function AddL($t) { [void]$L.Add([string]$t) }
+    
+    AddL 'SOLUTION DESIGN'
+    AddL '==============='
+    AddL ''
+    AddL ("Unique name: " + $inv.UniqueName)
+    AddL ("Version: " + $inv.Version)
+    AddL ("Publisher: " + $inv.Publisher + "  (prefix: " + $inv.Prefix + ")")
+    AddL ("Managed: " + $inv.Managed)
+    AddL ''
+    AddL 'Component counts'
+    AddL '----------------'
+    AddL ("Tables: " + $tables.Count)
+    AddL ("Forms (rows): " + $forms.Count)
+    AddL ("Views: " + $views.Count)
+    AddL ("Model-driven apps: " + $apps.Count)
+    AddL ("Site maps: " + $maps.Count)
+    AddL ("Agent topics: " + $bots.Count)
+    AddL ("Cloud flows: " + $flows.Count)
+    AddL ("Global choices: " + $inv.GlobalChoiceCount)
+    AddL ("Connection references: " + $inv.ConnectionRefCount)
+    AddL ("Environment variables: " + $inv.EnvVariableCount)
+    AddL ''
+    AddL ''
+    AddL '================================================================'
+    AddL ' TABLES'
+    AddL '================================================================'
+    if ($tables.Count -eq 0) { AddL 'None found.' }
+    foreach ($t in $tables) { AddL ("- " + $t.Display + "  (" + $t.Logical + ", " + $t.Columns + " columns)") }
+    AddL ''
+    AddL ''
+    AddL '================================================================'
+    AddL ' MODEL-DRIVEN APPS'
+    AddL '================================================================'
+    if ($apps.Count -eq 0) { AddL 'No model-driven apps found.' }
+    foreach ($a in $apps) { AddL ("- " + $a.Display + "  (" + $a.Unique + ")") }
+    AddL ''
+    AddL 'Site maps'
+    AddL '---------'
+    if ($maps.Count -eq 0) { AddL 'No site maps found.' }
     $surfaced = New-Object System.Collections.ArrayList
     foreach ($m in $maps) {
-        W-H $wdHeading2 ("Site map: " + $m.Name)
+        AddL ("SITE MAP: " + $m.Name)
         foreach ($area in $m.Areas) {
-            W-H $wdHeading3 ("Area: " + $area.Title)
+            AddL ("  Area: " + $area.Title)
             foreach ($grp in $area.Groups) {
-                W-P ("  Group: " + $grp.Title)
+                AddL ("    Group: " + $grp.Title)
                 foreach ($sa in $grp.SubAreas) {
                     $label = $sa.Title; if (-not $label) { $label = $sa.Entity }
                     $target = if ($sa.Entity) { "table: " + $sa.Entity } elseif ($sa.Url) { "url: " + $sa.Url } else { '' }
-                    W-P ("    - " + $label + "  (" + $target + ")")
+                    AddL ("      - " + $label + "  (" + $target + ")")
                     if ($sa.Entity -and -not $surfaced.Contains($sa.Entity)) { [void]$surfaced.Add($sa.Entity) }
                 }
             }
         }
+        AddL ''
     }
-    W-H $wdHeading1 'Tables surfaced across all site maps'
-    if ($surfaced.Count -eq 0) { W-P 'None resolved.' }
-    foreach ($e in $surfaced) { W-P ("- " + $e) }
-    W-H $wdHeading1 'Views by table (per-location filters live here)'
-    if ($views.Count -eq 0) { W-P 'No views found.' }
+    AddL 'Tables surfaced across all site maps'
+    AddL '------------------------------------'
+    if ($surfaced.Count -eq 0) { AddL 'None resolved.' }
+    foreach ($e in $surfaced) { AddL ("- " + $e) }
+    AddL ''
+    AddL 'Views by table (per-location filters live here)'
+    AddL '-----------------------------------------------'
+    if ($views.Count -eq 0) { AddL 'No views found.' }
     $viewsByTable = $views | Group-Object Table
     foreach ($g in $viewsByTable) {
-        W-H $wdHeading2 ("Table: " + $g.Name)
+        AddL ("TABLE: " + $g.Name)
         foreach ($v in $g.Group) {
             $def = if ($v.IsDefault -eq '1') { ' [default]' } else { '' }
-            W-P ("- " + $v.View + $def)
-            if ($v.Filter) { W-P ("    filter: " + $v.Filter) }
-            if ($v.Sort) { W-P ("    sort: " + $v.Sort) }
-            if ($v.Columns) { W-P ("    columns: " + $v.Columns) }
+            AddL ("  - " + $v.View + $def)
+            if ($v.Filter) { AddL ("      filter: " + $v.Filter) }
+            if ($v.Sort) { AddL ("      sort: " + $v.Sort) }
+            if ($v.Columns) { AddL ("      columns: " + $v.Columns) }
         }
+        AddL ''
     }
-    Save-Doc $mdaDocx
-    Write-Host "Wrote $mdaDocx"
-
-    New-Doc
-    W-Title 'Agent Design'
-    if ($botCfg.Name) { W-P ("Bot: " + $botCfg.Name) }
+    AddL ''
+    AddL '================================================================'
+    AddL ' AGENT DESIGN'
+    AddL '================================================================'
+    if ($botCfg.Name) { AddL ("Bot: " + $botCfg.Name) }
     if ($botCfg.Instructions) {
-        W-H $wdHeading1 'System instructions'
-        W-Code $botCfg.Instructions
+        AddL ''
+        AddL 'System instructions:'
+        foreach ($line in ($botCfg.Instructions -split "`r?`n")) { AddL ("  " + $line) }
     }
+    AddL ''
     $globalSetMap = @{}
     $globalReadMap = @{}
     foreach ($b in $bots) {
@@ -646,53 +737,220 @@ try {
     }
     $allGlobals = @($globalSetMap.Keys + $globalReadMap.Keys | Select-Object -Unique | Sort-Object)
     if ($allGlobals.Count -gt 0) {
-        W-H $wdHeading1 'Global variables cross-reference'
+        AddL 'Global variables cross-reference'
+        AddL '--------------------------------'
         foreach ($g in $allGlobals) {
-            W-H $wdHeading3 ("Global." + $g)
             $setBy = if ($globalSetMap.ContainsKey($g)) { ($globalSetMap[$g] | Select-Object -Unique) -join ', ' } else { '(not set in any topic)' }
             $readBy = if ($globalReadMap.ContainsKey($g)) { ($globalReadMap[$g] | Select-Object -Unique) -join ', ' } else { '(not read)' }
-            W-P ("Set by: " + $setBy)
-            W-P ("Read by: " + $readBy)
+            AddL ("Global." + $g)
+            AddL ("  Set by:  " + $setBy)
+            AddL ("  Read by: " + $readBy)
         }
+        AddL ''
     }
+    AddL 'Topics'
+    AddL '------'
+    if ($bots.Count -eq 0) { AddL 'No agent topics found.' }
     foreach ($b in $bots) {
-        W-H $wdHeading1 ("Topic: " + $b.DisplayName)
-        if ($b.ComponentType) { W-P ("Component type: " + $b.ComponentType + "    (" + $b.LineCount + " lines of YAML; full body in DataDictionary.xlsx > Topics)") }
-        W-H $wdHeading2 'Trigger phrases'
-        if ($b.Triggers.Count -eq 0) { W-P 'None detected.' }
-        foreach ($t in $b.Triggers) { W-P ("- " + $t) }
-        if ($b.GlobalsSet.Count -gt 0) {
-            W-H $wdHeading2 'Global variables set here'
-            foreach ($g in $b.GlobalsSet) { W-P ("- Global." + $g) }
+        AddL ("TOPIC: " + $b.DisplayName + "   [" + $b.ComponentType + ", " + $b.LineCount + " lines; full YAML in DataDictionary.xlsx > Topics]")
+        if ($b.Triggers.Count -gt 0) {
+            AddL '  Trigger phrases:'
+            foreach ($t in $b.Triggers) { AddL ("    - " + $t) }
         }
-        if ($b.GlobalsRead.Count -gt 0) {
-            W-H $wdHeading2 'Global variables read (set elsewhere)'
-            foreach ($g in $b.GlobalsRead) { W-P ("- Global." + $g) }
-        }
-        if ($b.TopicVarsSet.Count -gt 0) {
-            W-H $wdHeading2 'Topic variables set'
-            foreach ($tv in $b.TopicVarsSet) { W-P ("- Topic." + $tv) }
-        }
-        if ($b.Actions.Count -gt 0) {
-            W-H $wdHeading2 'Action kinds used'
-            foreach ($act in ($b.Actions | Select-Object -Unique)) { W-P ("- " + $act) }
-        }
+        if ($b.GlobalsSet.Count -gt 0) { AddL ("  Globals set:  " + ($b.GlobalsSet -join ', ')) }
+        if ($b.GlobalsRead.Count -gt 0) { AddL ("  Globals read: " + ($b.GlobalsRead -join ', ')) }
+        if ($b.TopicVarsSet.Count -gt 0) { AddL ("  Topic vars set: " + ($b.TopicVarsSet -join ', ')) }
+        if ($b.Actions.Count -gt 0) { AddL ("  Action kinds: " + (($b.Actions | Select-Object -Unique) -join ', ')) }
         if ($b.Knowledge.Count -gt 0) {
-            W-H $wdHeading2 'Knowledge / search / binding references'
-            foreach ($k in $b.Knowledge) { W-P ("- " + $k) }
+            AddL '  Knowledge / search / binding references:'
+            foreach ($k in $b.Knowledge) { AddL ("    - " + $k) }
         }
+        AddL ''
     }
-    Save-Doc $agentDocx
-    Write-Host "Wrote $agentDocx"
-} finally {
-    if ($word) { $word.Quit() }
-    Release-Com $word
-    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+    AddL ''
+    AddL '================================================================'
+    AddL ' POWER AUTOMATE CLOUD FLOWS'
+    AddL '================================================================'
+    if ($flows.Count -eq 0) { AddL 'No flows found.' }
+    foreach ($fl in $flows) {
+        AddL ("FLOW: " + $fl.Name)
+        AddL ("  Category: " + $fl.Category + "    State: " + $fl.State)
+        if ($fl.Trigger) { AddL ("  Trigger: " + $fl.Trigger) }
+        if ($fl.ConnectionRefs.Count -gt 0) { AddL ("  Connection references: " + ($fl.ConnectionRefs -join ', ')) }
+        if ($fl.EnvVariables.Count -gt 0) { AddL ("  Environment variables: " + ($fl.EnvVariables -join ', ')) }
+        AddL ("  Actions (" + $fl.ActionCount + "):")
+        if ($fl.Actions.Count -eq 0) { AddL '    (none parsed)' }
+        foreach ($act in $fl.Actions) { AddL ("    - " + $act) }
+        AddL ''
+    }
+    
+    Set-Content -Path $txtPath -Value ($L -join "`r`n") -Encoding UTF8
+    Write-Host "Wrote $txtPath"
+    
+    Write-Host ''
+    Write-Host 'Done. Outputs:'
+    Write-Host "  $xlsxPath   (Tables, Columns, Relationships, Forms, Views, Topics, Flows)"
+    Write-Host "  $txtPath   (convert to .docx manually)"
 }
 
-Write-Host ''
-Write-Host 'Done. Add these to your Copilot Notebook:'
-Write-Host "  $xlsxPath"
-Write-Host "  $invDocx"
-Write-Host "  $mdaDocx"
-Write-Host "  $agentDocx"
+
+# ----------------------------------------------------------------------
+# GUI
+# ----------------------------------------------------------------------
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Solution to Notebook Converter'
+$form.Size = New-Object System.Drawing.Size(720, 560)
+$form.StartPosition = 'CenterScreen'
+$form.MinimumSize = New-Object System.Drawing.Size(640, 480)
+$form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+
+$lblSrc = New-Object System.Windows.Forms.Label
+$lblSrc.Text = 'Unzipped solution folder:'
+$lblSrc.Location = New-Object System.Drawing.Point(15, 18)
+$lblSrc.AutoSize = $true
+$form.Controls.Add($lblSrc)
+
+$txtSrc = New-Object System.Windows.Forms.TextBox
+$txtSrc.Location = New-Object System.Drawing.Point(18, 40)
+$txtSrc.Size = New-Object System.Drawing.Size(580, 24)
+$txtSrc.Anchor = 'Top,Left,Right'
+$form.Controls.Add($txtSrc)
+
+$btnSrc = New-Object System.Windows.Forms.Button
+$btnSrc.Text = 'Browse...'
+$btnSrc.Location = New-Object System.Drawing.Point(606, 39)
+$btnSrc.Size = New-Object System.Drawing.Size(85, 26)
+$btnSrc.Anchor = 'Top,Right'
+$form.Controls.Add($btnSrc)
+
+$lblOut = New-Object System.Windows.Forms.Label
+$lblOut.Text = 'Output folder:'
+$lblOut.Location = New-Object System.Drawing.Point(15, 76)
+$lblOut.AutoSize = $true
+$form.Controls.Add($lblOut)
+
+$txtOut = New-Object System.Windows.Forms.TextBox
+$txtOut.Location = New-Object System.Drawing.Point(18, 98)
+$txtOut.Size = New-Object System.Drawing.Size(580, 24)
+$txtOut.Anchor = 'Top,Left,Right'
+$form.Controls.Add($txtOut)
+
+$btnOut = New-Object System.Windows.Forms.Button
+$btnOut.Text = 'Browse...'
+$btnOut.Location = New-Object System.Drawing.Point(606, 97)
+$btnOut.Size = New-Object System.Drawing.Size(85, 26)
+$btnOut.Anchor = 'Top,Right'
+$form.Controls.Add($btnOut)
+
+$lblCap = New-Object System.Windows.Forms.Label
+$lblCap.Text = 'Raw YAML line cap (Topics sheet):'
+$lblCap.Location = New-Object System.Drawing.Point(15, 134)
+$lblCap.AutoSize = $true
+$form.Controls.Add($lblCap)
+
+$numCap = New-Object System.Windows.Forms.NumericUpDown
+$numCap.Location = New-Object System.Drawing.Point(220, 132)
+$numCap.Size = New-Object System.Drawing.Size(80, 24)
+$numCap.Minimum = 50
+$numCap.Maximum = 100000
+$numCap.Value = 400
+$form.Controls.Add($numCap)
+
+$btnRun = New-Object System.Windows.Forms.Button
+$btnRun.Text = 'Run'
+$btnRun.Location = New-Object System.Drawing.Point(18, 168)
+$btnRun.Size = New-Object System.Drawing.Size(110, 32)
+$btnRun.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 212)
+$btnRun.ForeColor = [System.Drawing.Color]::White
+$btnRun.FlatStyle = 'Flat'
+$form.Controls.Add($btnRun)
+
+$btnOpen = New-Object System.Windows.Forms.Button
+$btnOpen.Text = 'Open output folder'
+$btnOpen.Location = New-Object System.Drawing.Point(138, 168)
+$btnOpen.Size = New-Object System.Drawing.Size(150, 32)
+$btnOpen.Enabled = $false
+$form.Controls.Add($btnOpen)
+
+$lblStatus = New-Object System.Windows.Forms.Label
+$lblStatus.Text = 'Ready.'
+$lblStatus.Location = New-Object System.Drawing.Point(300, 176)
+$lblStatus.Size = New-Object System.Drawing.Size(390, 20)
+$lblStatus.Anchor = 'Top,Left,Right'
+$form.Controls.Add($lblStatus)
+
+$txtLog = New-Object System.Windows.Forms.TextBox
+$txtLog.Location = New-Object System.Drawing.Point(18, 212)
+$txtLog.Size = New-Object System.Drawing.Size(673, 298)
+$txtLog.Multiline = $true
+$txtLog.ScrollBars = 'Vertical'
+$txtLog.ReadOnly = $true
+$txtLog.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
+$txtLog.ForeColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
+$txtLog.Font = New-Object System.Drawing.Font('Consolas', 9)
+$txtLog.Anchor = 'Top,Bottom,Left,Right'
+$form.Controls.Add($txtLog)
+
+function Write-Log {
+    param([string]$Text)
+    $txtLog.AppendText($Text + "`r`n")
+    $txtLog.SelectionStart = $txtLog.Text.Length
+    $txtLog.ScrollToCaret()
+    [System.Windows.Forms.Application]::DoEvents()
+}
+
+$btnSrc.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = 'Select the unzipped solution export folder'
+    if ($txtSrc.Text -and (Test-Path $txtSrc.Text)) { $dlg.SelectedPath = $txtSrc.Text }
+    if ($dlg.ShowDialog() -eq 'OK') {
+        $txtSrc.Text = $dlg.SelectedPath
+        if (-not $txtOut.Text) { $txtOut.Text = Join-Path $dlg.SelectedPath 'NotebookDocs' }
+    }
+})
+
+$btnOut.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = 'Select the output folder'
+    if ($txtOut.Text -and (Test-Path $txtOut.Text)) { $dlg.SelectedPath = $txtOut.Text }
+    if ($dlg.ShowDialog() -eq 'OK') { $txtOut.Text = $dlg.SelectedPath }
+})
+
+$btnOpen.Add_Click({
+    if ($txtOut.Text -and (Test-Path $txtOut.Text)) { Start-Process explorer.exe $txtOut.Text }
+})
+
+$btnRun.Add_Click({
+    $src = $txtSrc.Text.Trim()
+    $out = $txtOut.Text.Trim()
+    if (-not $src -or -not (Test-Path $src)) {
+        [System.Windows.Forms.MessageBox]::Show('Please select a valid unzipped solution folder.', 'Missing input', 'OK', 'Warning') | Out-Null
+        return
+    }
+    if (-not $out) {
+        [System.Windows.Forms.MessageBox]::Show('Please select an output folder.', 'Missing input', 'OK', 'Warning') | Out-Null
+        return
+    }
+    $btnRun.Enabled = $false
+    $btnOpen.Enabled = $false
+    $txtLog.Clear()
+    $lblStatus.Text = 'Running... the window may pause briefly while Excel is written.'
+    [System.Windows.Forms.Application]::DoEvents()
+    try {
+        $output = Invoke-Conversion -UnpackedFolder $src -OutputFolder $out -RawYamlLineCap ([int]$numCap.Value) *>&1
+        foreach ($line in $output) { Write-Log ([string]$line) }
+        $lblStatus.Text = 'Done.'
+        $btnOpen.Enabled = $true
+    } catch {
+        Write-Log ''
+        Write-Log ('ERROR: ' + $_.Exception.Message)
+        $lblStatus.Text = 'Failed - see log.'
+        try { Get-Process EXCEL -ErrorAction SilentlyContinue | Stop-Process -Force } catch {}
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, 'Conversion failed', 'OK', 'Error') | Out-Null
+    } finally {
+        $btnRun.Enabled = $true
+    }
+})
+
+[void]$form.ShowDialog()
